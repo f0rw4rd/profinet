@@ -110,6 +110,77 @@ def decode_device_role(role_byte: int) -> List[str]:
             roles.append(name)
     return roles if roles else ["Unknown"]
 
+
+# Option names for display
+DCP_OPTION_NAMES = {
+    0x01: "IP",
+    0x02: "Device",
+    0x03: "DHCP",
+    0x05: "Control",
+    0x06: "DeviceInitiative",
+    0x07: "NME",
+    0xFF: "All",
+}
+
+# Suboption names per option
+DCP_SUBOPTION_NAMES = {
+    0x01: {  # IP
+        0x01: "MAC",
+        0x02: "IP",
+        0x03: "FullIPSuite",
+    },
+    0x02: {  # Device
+        0x01: "Type",
+        0x02: "Name",
+        0x03: "DeviceID",
+        0x04: "Role",
+        0x05: "Options",
+        0x06: "Alias",
+        0x07: "Instance",
+        0x08: "OEM-ID",
+        0x0A: "RSI",
+    },
+    0x03: {  # DHCP
+        0x0C: "Hostname",
+        0x2B: "VendorSpec",
+        0x36: "ServerID",
+        0x37: "ParamReq",
+        0x3C: "ClassID",
+        0x3D: "ClientID",
+        0x51: "FQDN",
+        0x61: "UUID",
+        0xFF: "Control",
+    },
+    0x05: {  # Control
+        0x01: "Start",
+        0x02: "Stop",
+        0x03: "Signal",
+        0x04: "Response",
+        0x05: "FactoryReset",
+        0x06: "ResetToFactory",
+    },
+    0x06: {  # DeviceInitiative
+        0x01: "Initiative",
+    },
+}
+
+
+def get_block_name(option: int, suboption: int) -> str:
+    """Get human-readable name for a DCP block."""
+    opt_name = DCP_OPTION_NAMES.get(option)
+    if opt_name is None:
+        if 0x80 <= option <= 0xFE:
+            opt_name = f"Vendor-0x{option:02X}"
+        else:
+            opt_name = f"Opt-0x{option:02X}"
+
+    subopt_names = DCP_SUBOPTION_NAMES.get(option, {})
+    subopt_name = subopt_names.get(suboption)
+    if subopt_name is None:
+        subopt_name = f"0x{suboption:02X}"
+
+    return f"{opt_name}/{subopt_name}"
+
 # Reset modes for Reset to Factory
 RESET_MODE_COMMUNICATION = 0x0002  # Mode 2: Reset communication params (mandatory)
 RESET_MODE_APPLICATION = 0x0004   # Mode 1: Reset application data
@@ -240,6 +311,19 @@ class DCPDeviceDescription:
                 subopt = options_block[i + 1]
                 self.supported_options.append((opt, subopt))
 
+        # Store all raw blocks for unknown/vendor-specific options
+        self.raw_blocks: Dict[Tuple[int, int], bytes] = {}
+        known_blocks = {
+            PNDCPBlock.IP_ADDRESS, PNDCPBlock.DEVICE_TYPE, PNDCPBlock.NAME_OF_STATION,
+            PNDCPBlock.DEVICE_ID, PNDCPBlock.DEVICE_ROLE, PNDCPBlock.DEVICE_OPTIONS,
+            PNDCPBlock.DEVICE_ALIAS, PNDCPBlock.DEVICE_INSTANCE,
+            (DCP_OPTION_DEVICE, DCP_SUBOPTION_DEVICE_INSTANCE),
+            (DCP_OPTION_DEVICE, DCP_SUBOPTION_DEVICE_ALIAS),
+        }
+        for key, value in blocks.items():
+            if isinstance(key, tuple) and key not in known_blocks:
+                self.raw_blocks[key] = value
+
     @property
     def vendor_id(self) -> int:
         """Get 16-bit vendor ID."""
@@ -282,8 +366,11 @@ class DCPDeviceDescription:
         if self.alias_name:
             lines.append(f"  Alias:   {self.alias_name}")
         if self.supported_options:
-            opts = [f"({o},{s})" for o, s in self.supported_options]
-            lines.append(f"  Options: {' '.join(opts)}")
+            opts = [get_block_name(o, s) for o, s in self.supported_options]
+            lines.append(f"  Supports: {', '.join(opts)}")
+        if self.raw_blocks:
+            for (opt, subopt), data in self.raw_blocks.items():
+                lines.append(f"  Unknown ({opt},{subopt}): {data.hex()}")
         return "\n".join(lines)
 
 
