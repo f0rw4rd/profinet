@@ -116,12 +116,20 @@ class PNDCPBlock(
     """DCP response block."""
 
     # Block option/suboption constants
+    # IP Option (0x01)
+    IP_MAC: Tuple[int, int] = (1, 1)
     IP_ADDRESS: Tuple[int, int] = (1, 2)
-    DEVICE_TYPE: Tuple[int, int] = (2, 1)  # Device type/family (e.g., "S7-1200")
+    IP_FULL_SUITE: Tuple[int, int] = (1, 3)
+    # Device Option (0x02)
+    DEVICE_TYPE: Tuple[int, int] = (2, 1)  # Type of Station / Manufacturer specific
     NAME_OF_STATION: Tuple[int, int] = (2, 2)
-    DEVICE_ID: Tuple[int, int] = (2, 3)
-    DEVICE_ROLE: Tuple[int, int] = (2, 4)
-    DEVICE_OPTIONS: Tuple[int, int] = (2, 5)
+    DEVICE_ID: Tuple[int, int] = (2, 3)  # Vendor ID + Device ID
+    DEVICE_ROLE: Tuple[int, int] = (2, 4)  # IO-Device, IO-Controller, etc.
+    DEVICE_OPTIONS: Tuple[int, int] = (2, 5)  # Supported options list
+    DEVICE_ALIAS: Tuple[int, int] = (2, 6)  # Alias name
+    DEVICE_INSTANCE: Tuple[int, int] = (2, 7)  # Device instance high/low
+    DEVICE_OEM_ID: Tuple[int, int] = (2, 8)  # OEM Device ID
+    # All selector
     ALL: Tuple[int, int] = (0xFF, 0xFF)
 
     def parse_ip(self) -> IPConfiguration:

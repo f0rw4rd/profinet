@@ -19,7 +19,7 @@ import random
 import time
 from socket import socket, timeout as SocketTimeout
 from struct import unpack
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .exceptions import DCPError, DCPDeviceNotFoundError, DCPTimeoutError
 from .protocol import (
@@ -60,7 +60,24 @@ DCP_OPTION_DEVICE = 0x02
 DCP_OPTION_DHCP = 0x03
 DCP_OPTION_CONTROL = 0x05
 DCP_OPTION_DEVICE_INITIATIVE = 0x06
+DCP_OPTION_NME = 0x07
 DCP_OPTION_ALL = 0xFF
+
+# DCP SubOptions for IP (Option 1)
+DCP_SUBOPTION_IP_MAC = 0x01
+DCP_SUBOPTION_IP_PARAMETER = 0x02
+DCP_SUBOPTION_IP_FULL_SUITE = 0x03
+
+# DCP SubOptions for Device (Option 2)
+DCP_SUBOPTION_DEVICE_TYPE = 0x01      # Type of Station / Manufacturer specific
+DCP_SUBOPTION_DEVICE_NAME = 0x02      # Name of Station
+DCP_SUBOPTION_DEVICE_ID = 0x03        # Device ID (Vendor + Device)
+DCP_SUBOPTION_DEVICE_ROLE = 0x04      # Device Role
+DCP_SUBOPTION_DEVICE_OPTIONS = 0x05   # Supported options list
+DCP_SUBOPTION_DEVICE_ALIAS = 0x06     # Alias Name
+DCP_SUBOPTION_DEVICE_INSTANCE = 0x07  # Device Instance
+DCP_SUBOPTION_DEVICE_OEM_ID = 0x08    # OEM Device ID
+DCP_SUBOPTION_DEVICE_RSI = 0x0A       # RSI Properties
 
 # DCP SubOptions for Control (Option 5)
 DCP_SUBOPTION_CONTROL_START = 0x01
@@ -69,6 +86,29 @@ DCP_SUBOPTION_CONTROL_SIGNAL = 0x03
 DCP_SUBOPTION_CONTROL_RESPONSE = 0x04
 DCP_SUBOPTION_CONTROL_RESET_FACTORY = 0x05
 DCP_SUBOPTION_CONTROL_RESET_TO_FACTORY = 0x06
+
+# Device Role bit masks
+DEVICE_ROLE_IO_DEVICE = 0x01
+DEVICE_ROLE_IO_CONTROLLER = 0x02
+DEVICE_ROLE_IO_MULTIDEVICE = 0x04
+DEVICE_ROLE_PN_SUPERVISOR = 0x08
+
+# Device Role names
+DEVICE_ROLE_NAMES = {
+    DEVICE_ROLE_IO_DEVICE: "IO-Device",
+    DEVICE_ROLE_IO_CONTROLLER: "IO-Controller",
+    DEVICE_ROLE_IO_MULTIDEVICE: "IO-Multidevice",
+    DEVICE_ROLE_PN_SUPERVISOR: "PN-Supervisor",
+}
+
+
+def decode_device_role(role_byte: int) -> List[str]:
+    """Decode device role bitmask to list of role names."""
+    roles = []
+    for mask, name in DEVICE_ROLE_NAMES.items():
+        if role_byte & mask:
+            roles.append(name)
+    return roles if roles else ["Unknown"]
 
 # Reset modes for Reset to Factory
 RESET_MODE_COMMUNICATION = 0x0002  # Mode 2: Reset communication params (mandatory)
@@ -109,6 +149,11 @@ class DCPDeviceDescription:
         vendor_low: Low byte of vendor ID
         device_high: High byte of device ID
         device_low: Low byte of device ID
+        device_role: Device role bitmask
+        device_roles: List of role names (e.g., ["IO-Device"])
+        device_instance: Device instance (high, low)
+        alias_name: Alias name if set
+        supported_options: List of supported (option, suboption) tuples
     """
 
     def __init__(self, mac: bytes, blocks: Dict[Tuple[int, int], bytes]) -> None:
@@ -162,6 +207,39 @@ class DCPDeviceDescription:
             self.device_high = 0
             self.device_low = 0
 
+        # Handle device role (optional) - (2, 4)
+        role_block = blocks.get(PNDCPBlock.DEVICE_ROLE)
+        if role_block is not None and len(role_block) >= 1:
+            self.device_role = role_block[0]
+            self.device_roles = decode_device_role(self.device_role)
+        else:
+            self.device_role = 0
+            self.device_roles = []
+
+        # Handle device instance (optional) - (2, 7)
+        instance_block = blocks.get((DCP_OPTION_DEVICE, DCP_SUBOPTION_DEVICE_INSTANCE))
+        if instance_block is not None and len(instance_block) >= 2:
+            self.device_instance = (instance_block[0], instance_block[1])
+        else:
+            self.device_instance = (0, 0)
+
+        # Handle alias name (optional) - (2, 6)
+        alias_block = blocks.get((DCP_OPTION_DEVICE, DCP_SUBOPTION_DEVICE_ALIAS))
+        if alias_block is not None:
+            self.alias_name = alias_block.rstrip(b"\x00").decode("utf-8", errors="replace")
+        else:
+            self.alias_name = ""
+
+        # Handle device options (optional) - (2, 5)
+        # Each option is 2 bytes: option + suboption
+        options_block = blocks.get(PNDCPBlock.DEVICE_OPTIONS)
+        self.supported_options: List[Tuple[int, int]] = []
+        if options_block is not None and len(options_block) >= 2:
+            for i in range(0, len(options_block) - 1, 2):
+                opt = options_block[i]
+                subopt = options_block[i + 1]
+                self.supported_options.append((opt, subopt))
+
     @property
     def vendor_id(self) -> int:
         """Get 16-bit vendor ID."""
@@ -197,6 +275,15 @@ class DCPDeviceDescription:
             f"  Vendor:  {self.vendor_name} (0x{self.vendor_id:04X})",
             f"  Device:  0x{self.device_id:04X}",
         ])
+        if self.device_roles:
+            lines.append(f"  Role:    {', '.join(self.device_roles)}")
+        if self.device_instance != (0, 0):
+            lines.append(f"  Instance: {self.device_instance[0]}.{self.device_instance[1]}")
+        if self.alias_name:
+            lines.append(f"  Alias:   {self.alias_name}")
+        if self.supported_options:
+            opts = [f"({o},{s})" for o, s in self.supported_options]
+            lines.append(f"  Options: {' '.join(opts)}")
         return "\n".join(lines)
 
 
