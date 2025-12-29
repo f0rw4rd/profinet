@@ -112,6 +112,24 @@ from .vendors import (
 )
 
 from . import indices
+from . import blocks
+
+from .blocks import (
+    # Data classes for block parsing
+    BlockHeader,
+    SlotInfo,
+    PeerInfo,
+    PDRealData,
+    RealIdentificationData,
+    # Parsing functions
+    parse_block_header,
+    parse_multiple_block_header,
+    parse_pd_interface_data_real,
+    parse_pd_port_data_real,
+    parse_pd_real_data,
+    parse_real_identification_data,
+    parse_port_statistics,
+)
 
 from .exceptions import (
     ProfinetError,
@@ -201,6 +219,19 @@ __all__ = [
     "decode_ext_channel_error_type",
     "CHANNEL_ERROR_TYPES",
     "EXT_CHANNEL_ERROR_TYPES_MAP",
+    # Blocks module
+    "BlockHeader",
+    "SlotInfo",
+    "PeerInfo",
+    "PDRealData",
+    "RealIdentificationData",
+    "parse_block_header",
+    "parse_multiple_block_header",
+    "parse_pd_interface_data_real",
+    "parse_pd_port_data_real",
+    "parse_pd_real_data",
+    "parse_real_identification_data",
+    "parse_port_statistics",
     # Exceptions
     "ProfinetError",
     "DCPError",

@@ -58,6 +58,8 @@ from .diagnosis import (
     CHANNEL_ERROR_TYPES,
     EXT_CHANNEL_ERROR_TYPES_MAP,
 )
+from . import indices
+from . import blocks
 
 
 # =============================================================================
@@ -1296,6 +1298,67 @@ class RPCCon:
         """
         iod = self.read(api=0, slot=slot, subslot=subslot, idx=idx)
         return iod.payload
+
+    def read_pd_real_data(self) -> blocks.PDRealData:
+        """Read and parse PDRealData (0xF841) from device.
+
+        PDRealData contains the physical device structure including
+        interface information and port details.
+
+        Returns:
+            PDRealData with parsed slots, interface, and ports
+
+        Raises:
+            RPCError: If read fails
+        """
+        iod = self.read(api=0, slot=0, subslot=1, idx=indices.PD_REAL_DATA)
+        return blocks.parse_pd_real_data(iod.payload)
+
+    def read_real_identification_data(self) -> blocks.RealIdentificationData:
+        """Read and parse RealIdentificationData (0xF000) from device.
+
+        RealIdentificationData contains the complete logical slot/subslot
+        structure with module/submodule identification numbers.
+
+        Returns:
+            RealIdentificationData with parsed slot structure
+
+        Raises:
+            RPCError: If read fails
+        """
+        iod = self.read(api=0, slot=0, subslot=1, idx=indices.REAL_ID_API)
+        return blocks.parse_real_identification_data(iod.payload)
+
+    def discover_slots(self) -> List[blocks.SlotInfo]:
+        """Discover all slots/subslots from device.
+
+        Reads RealIdentificationData (0xF000) which provides the complete
+        logical structure of the device including all APIs, slots, and subslots.
+
+        Returns:
+            List of SlotInfo for each discovered slot/subslot
+
+        Raises:
+            RPCError: If read fails
+        """
+        real_id = self.read_real_identification_data()
+        return real_id.slots
+
+    def discover_topology(self) -> Tuple[blocks.PDRealData, blocks.RealIdentificationData]:
+        """Discover complete device topology.
+
+        Reads both PDRealData (0xF841) for physical structure and
+        RealIdentificationData (0xF000) for logical structure.
+
+        Returns:
+            Tuple of (PDRealData, RealIdentificationData)
+
+        Raises:
+            RPCError: If reads fail
+        """
+        pd_real = self.read_pd_real_data()
+        real_id = self.read_real_identification_data()
+        return pd_real, real_id
 
     def close(self) -> None:
         """Close RPC connection."""

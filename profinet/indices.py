@@ -15,6 +15,99 @@ Index ranges determine addressing scope:
 from typing import Dict, List, Tuple
 
 # =============================================================================
+# Block Types (from Wireshark pn_io_block_type dissector)
+# Used in block headers to identify block content
+# =============================================================================
+
+# Diagnosis blocks
+BLOCK_DIAGNOSIS_DATA = 0x0010
+BLOCK_DIAGNOSIS_DATA_QUALIFIED_CHANNEL = 0x0012
+BLOCK_REAL_IDENTIFICATION_DATA = 0x0013
+
+# I&M blocks
+BLOCK_IM0 = 0x0020
+BLOCK_IM1 = 0x0021
+BLOCK_IM2 = 0x0022
+BLOCK_IM3 = 0x0023
+BLOCK_IM4 = 0x0024
+BLOCK_IM5 = 0x0025
+
+# AR data blocks
+BLOCK_AR_DATA = 0x0018
+BLOCK_LOG_DATA = 0x0019
+BLOCK_API_DATA = 0x001A
+BLOCK_SRL_DATA = 0x001B
+
+# Port and interface data blocks
+BLOCK_PD_PORT_DATA_CHECK = 0x0200
+BLOCK_PD_PORT_DATA_ADJUST = 0x0202
+BLOCK_PD_PORT_DATA_REAL = 0x020F
+BLOCK_PD_INTERFACE_MRP_DATA_ADJUST = 0x0211
+BLOCK_PD_INTERFACE_MRP_DATA_REAL = 0x0212
+BLOCK_PD_PORT_MRP_DATA_REAL = 0x0215
+BLOCK_MRP_RING_STATE_DATA = 0x0219
+BLOCK_PD_PORT_FO_DATA_REAL = 0x0220
+BLOCK_PD_PORT_FO_DATA_CHECK = 0x0221
+BLOCK_PD_PORT_FO_DATA_ADJUST = 0x0222
+BLOCK_PD_PORT_DATA_REAL_EXTENDED = 0x022C
+BLOCK_PD_INTERFACE_DATA_REAL = 0x0240
+BLOCK_PD_PORT_STATISTIC = 0x0251
+
+# Container blocks
+BLOCK_MULTIPLE_HEADER = 0x0400
+BLOCK_CO_CONTAINER_CONTENT = 0x0401
+
+# Device-level blocks (0xF8xx)
+BLOCK_AR_SERVER_BLOCK = 0xF820
+BLOCK_PD_REAL_DATA = 0xF841
+BLOCK_PD_EXPECTED_DATA = 0xF842
+
+# API-level blocks (0xF0xx)
+BLOCK_REAL_IDENTIFICATION_DATA_API = 0xF000
+
+# Block type name mapping for debugging/display
+BLOCK_TYPE_NAMES: Dict[int, str] = {
+    BLOCK_DIAGNOSIS_DATA: "DiagnosisData",
+    BLOCK_DIAGNOSIS_DATA_QUALIFIED_CHANNEL: "DiagnosisDataQualifiedChannel",
+    BLOCK_REAL_IDENTIFICATION_DATA: "RealIdentificationData",
+    BLOCK_IM0: "I&M0",
+    BLOCK_IM1: "I&M1",
+    BLOCK_IM2: "I&M2",
+    BLOCK_IM3: "I&M3",
+    BLOCK_IM4: "I&M4",
+    BLOCK_IM5: "I&M5",
+    BLOCK_AR_DATA: "ARData",
+    BLOCK_LOG_DATA: "LogData",
+    BLOCK_API_DATA: "APIData",
+    BLOCK_SRL_DATA: "SRLData",
+    BLOCK_PD_PORT_DATA_CHECK: "PDPortDataCheck",
+    BLOCK_PD_PORT_DATA_ADJUST: "PDPortDataAdjust",
+    BLOCK_PD_PORT_DATA_REAL: "PDPortDataReal",
+    BLOCK_PD_INTERFACE_MRP_DATA_ADJUST: "PDInterfaceMrpDataAdjust",
+    BLOCK_PD_INTERFACE_MRP_DATA_REAL: "PDInterfaceMrpDataReal",
+    BLOCK_PD_PORT_MRP_DATA_REAL: "PDPortMrpDataReal",
+    BLOCK_MRP_RING_STATE_DATA: "MrpRingStateData",
+    BLOCK_PD_PORT_FO_DATA_REAL: "PDPortFODataReal",
+    BLOCK_PD_PORT_FO_DATA_CHECK: "PDPortFODataCheck",
+    BLOCK_PD_PORT_FO_DATA_ADJUST: "PDPortFODataAdjust",
+    BLOCK_PD_PORT_DATA_REAL_EXTENDED: "PDPortDataRealExtended",
+    BLOCK_PD_INTERFACE_DATA_REAL: "PDInterfaceDataReal",
+    BLOCK_PD_PORT_STATISTIC: "PDPortStatistic",
+    BLOCK_MULTIPLE_HEADER: "MultipleBlockHeader",
+    BLOCK_CO_CONTAINER_CONTENT: "COContainerContent",
+    BLOCK_AR_SERVER_BLOCK: "ARServerBlock",
+    BLOCK_PD_REAL_DATA: "PDRealData",
+    BLOCK_PD_EXPECTED_DATA: "PDExpectedData",
+    BLOCK_REAL_IDENTIFICATION_DATA_API: "RealIdentificationDataAPI",
+}
+
+
+def get_block_type_name(block_type: int) -> str:
+    """Get human-readable name for a block type."""
+    return BLOCK_TYPE_NAMES.get(block_type, f"Unknown(0x{block_type:04X})")
+
+
+# =============================================================================
 # I&M (Identification & Maintenance) Indices - 0xAFFx
 # =============================================================================
 
