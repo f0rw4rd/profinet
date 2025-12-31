@@ -1772,6 +1772,7 @@ class RPCCon:
                 padding2=0,
                 control_command=0x0004,  # Terminate AR
                 control_block_properties=0,
+                payload=b"",  # No payload for release
             )
 
             nrd = self._create_nrd(bytes(release))
