@@ -36,6 +36,7 @@ from .protocol import (
     PNBlockHeader,
     PNDCPBlock,
     PNIODHeader,
+    PNIODReleaseBlock,
     PNNRDData,
     PNRPCHeader,
     PNInM0,
@@ -633,6 +634,7 @@ class RPCCon:
         # Connection state
         self.live: Optional[datetime] = None
         self.src_mac: Optional[bytes] = None
+        self.session_key: int = 1  # Session key for AR (default 1)
 
         # UDP socket for RPC with timeout
         self._socket = socket(AF_INET, SOCK_DGRAM)
@@ -1749,13 +1751,48 @@ class RPCCon:
         real_id = self.read_real_identification_data()
         return pd_real, real_id
 
+    def disconnect(self) -> None:
+        """Send Release request to properly terminate the AR.
+
+        Per IEC 61158-6-10, sends ReleaseBlockReq (0x0114) with
+        control command 0x0004 to terminate the application relation.
+        """
+        if not self.live:
+            return  # Not connected
+
+        try:
+            # Build ReleaseBlockReq (block type 0x0114)
+            block = PNBlockHeader(0x0114, 28, 0x01, 0x00)  # ReleaseBlockReq
+
+            release = PNIODReleaseBlock(
+                block_header=bytes(block),
+                padding1=0,
+                ar_uuid=self.ar_uuid,
+                session_key=self.session_key,
+                padding2=0,
+                control_command=0x0004,  # Terminate AR
+                control_block_properties=0,
+            )
+
+            nrd = self._create_nrd(bytes(release))
+            rpc = self._create_rpc(PNRPCHeader.RELEASE, bytes(nrd))
+
+            # Send release, don't wait for response (best effort)
+            self._socket.sendto(bytes(rpc), self.peer)
+            logger.debug(f"Sent Release to {self.info.name}")
+
+        except Exception as e:
+            logger.debug(f"Release failed: {e}")
+
+        self.live = None
+
     def close(self) -> None:
-        """Close RPC connection."""
+        """Close RPC connection (sends Release if connected)."""
+        self.disconnect()
         try:
             self._socket.close()
         except OSError:
             pass
-        self.live = None
         logger.debug(f"Closed connection to {self.info.name}")
 
     def __enter__(self) -> "RPCCon":
