@@ -757,6 +757,7 @@ class TestEPMEndpoint:
         assert ep.protocol == ""
         assert ep.port == 0
         assert ep.address == ""
+        assert ep.annotation == ""
 
     def test_epm_endpoint_values(self):
         """Test EPMEndpoint with values."""
@@ -766,10 +767,12 @@ class TestEPMEndpoint:
             interface_version_minor=0,
             protocol="ncadg_ip_udp",
             port=34964,
-            address="192.168.1.100"
+            address="192.168.1.100",
+            annotation="S7-1500 6ES7 672-5DC01-0YA0"
         )
         assert ep.interface_uuid == UUID_PNIO_DEVICE
         assert ep.port == 34964
+        assert ep.annotation == "S7-1500 6ES7 672-5DC01-0YA0"
 
     def test_interface_name_pnio_device(self):
         """Test interface_name property for PNIO Device."""

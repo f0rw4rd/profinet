@@ -195,6 +195,7 @@ class EPMEndpoint:
     protocol: str = ""
     port: int = 0
     address: str = ""
+    annotation: str = ""  # Device model/article number from EPM response
 
     @property
     def interface_name(self) -> str:
@@ -510,7 +511,12 @@ def epm_lookup(
             annotation_len = struct.unpack("<I", body_data[offset : offset + 4])[0]
             offset += 4
 
-            # Skip annotation string
+            # Extract annotation string (device model/article number)
+            annotation = ""
+            if annotation_len > 0 and offset + annotation_len <= len(body_data):
+                annotation_bytes = body_data[offset : offset + annotation_len]
+                # Remove null terminator and decode
+                annotation = annotation_bytes.rstrip(b"\x00").decode("utf-8", errors="replace")
             offset += annotation_len
             # Align to 4 bytes
             offset = (offset + 3) & ~3
@@ -533,6 +539,7 @@ def epm_lookup(
             endpoint = _parse_epm_tower(tower_data)
             if endpoint:
                 endpoint.object_uuid = entry_object_uuid
+                endpoint.annotation = annotation
                 endpoints.append(endpoint)
 
         return endpoints
