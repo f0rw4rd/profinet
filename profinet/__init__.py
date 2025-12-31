@@ -40,6 +40,7 @@ from .protocol import (
 
 from .dcp import (
     DCPDeviceDescription,
+    DCPResponseCode,
     send_discover,
     send_request,
     read_response,
@@ -49,6 +50,14 @@ from .dcp import (
     signal_device,
     reset_to_factory,
     # Constants
+    DCP_MAX_NAME_LENGTH,
+    DCP_OPTION_IP,
+    DCP_OPTION_DEVICE,
+    DCP_OPTION_DHCP,
+    DCP_OPTION_LLDP,
+    DCP_OPTION_CONTROL,
+    DCP_OPTION_DEVICE_INITIATIVE,
+    DCP_OPTION_ALL,
     RESET_MODE_COMMUNICATION,
     RESET_MODE_APPLICATION,
     RESET_MODE_ENGINEERING,
@@ -69,6 +78,14 @@ from .rpc import (
     ARInfo,
     LogEntry,
     MAU_TYPES,
+    # RPC Constants
+    RPC_PORT,
+    RPC_BIND_PORT,
+    UUID_NULL,
+    UUID_EPM_V4,
+    UUID_PNIO_DEVICE,
+    UUID_PNIO_CONTROLLER,
+    PNIO_DEVICE_INTERFACE_VERSION,
 )
 
 from .diagnosis import (
@@ -148,7 +165,7 @@ from .exceptions import (
     PermissionDeniedError,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = [
     # Protocol structures
     "EthernetHeader",
@@ -171,6 +188,7 @@ __all__ = [
     "PNInM5",
     # DCP functions
     "DCPDeviceDescription",
+    "DCPResponseCode",
     "send_discover",
     "send_request",
     "read_response",
@@ -179,6 +197,15 @@ __all__ = [
     "set_ip",
     "signal_device",
     "reset_to_factory",
+    # DCP constants
+    "DCP_MAX_NAME_LENGTH",
+    "DCP_OPTION_IP",
+    "DCP_OPTION_DEVICE",
+    "DCP_OPTION_DHCP",
+    "DCP_OPTION_LLDP",
+    "DCP_OPTION_CONTROL",
+    "DCP_OPTION_DEVICE_INITIATIVE",
+    "DCP_OPTION_ALL",
     # Reset modes
     "RESET_MODE_COMMUNICATION",
     "RESET_MODE_APPLICATION",
@@ -189,6 +216,14 @@ __all__ = [
     # RPC
     "RPCCon",
     "get_station_info",
+    # RPC constants
+    "RPC_PORT",
+    "RPC_BIND_PORT",
+    "UUID_NULL",
+    "UUID_EPM_V4",
+    "UUID_PNIO_DEVICE",
+    "UUID_PNIO_CONTROLLER",
+    "PNIO_DEVICE_INTERFACE_VERSION",
     # Utilities
     "ethernet_socket",
     "udp_socket",

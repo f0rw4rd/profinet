@@ -657,3 +657,83 @@ class TestGetStationInfo:
                 info = get_station_info(mock_sock, b"\x00\x11\x22\x33\x44\x55", "found-device")
                 assert info.name == "found-device"
                 assert info.ip == "192.168.1.100"
+
+
+from profinet.rpc import (
+    RPC_PORT,
+    RPC_BIND_PORT,
+    UUID_NULL,
+    UUID_EPM_V4,
+    UUID_PNIO_DEVICE,
+    UUID_PNIO_CONTROLLER,
+    PNIO_DEVICE_INTERFACE_VERSION,
+)
+
+
+class TestRPCConstants:
+    """Test RPC port and UUID constants."""
+
+    def test_rpc_port_value(self):
+        """Test RPC port is 0x8894 (34964)."""
+        assert RPC_PORT == 0x8894
+        assert RPC_PORT == 34964
+
+    def test_rpc_bind_port_value(self):
+        """Test RPC bind port is 0x8895 (34965)."""
+        assert RPC_BIND_PORT == 0x8895
+        assert RPC_BIND_PORT == 34965
+
+    def test_uuid_null_value(self):
+        """Test NULL UUID constant."""
+        assert UUID_NULL == "00000000-0000-0000-0000-000000000000"
+
+    def test_uuid_epm_v4_value(self):
+        """Test Endpoint Mapper v4 UUID."""
+        assert UUID_EPM_V4 == "e1af8308-5d1f-11c9-91a4-08002b14a0fa"
+
+    def test_uuid_pnio_device_value(self):
+        """Test PROFINET IO Device UUID."""
+        assert UUID_PNIO_DEVICE == "dea00001-6c97-11d1-8271-00a02442df7d"
+
+    def test_uuid_pnio_controller_value(self):
+        """Test PROFINET IO Controller UUID."""
+        assert UUID_PNIO_CONTROLLER == "dea00002-6c97-11d1-8271-00a02442df7d"
+
+    def test_pnio_interface_version(self):
+        """Test PNIO Device Interface version."""
+        assert PNIO_DEVICE_INTERFACE_VERSION == 1
+
+    def test_uuid_device_and_controller_differ_only_in_last_digit(self):
+        """Test PNIO Device and Controller UUIDs differ only in last digit."""
+        # They should have the same prefix, differ only in 00001 vs 00002
+        assert UUID_PNIO_DEVICE[:-1] == "dea00001-6c97-11d1-8271-00a02442df7"
+        assert UUID_PNIO_CONTROLLER[:-1] == "dea00002-6c97-11d1-8271-00a02442df7"
+
+
+class TestRPCConstantsExport:
+    """Test RPC constants are exported correctly."""
+
+    def test_rpc_port_importable_from_package(self):
+        """Test RPC_PORT can be imported from profinet package."""
+        from profinet import RPC_PORT
+        assert RPC_PORT == 0x8894
+
+    def test_rpc_bind_port_importable_from_package(self):
+        """Test RPC_BIND_PORT can be imported from profinet package."""
+        from profinet import RPC_BIND_PORT
+        assert RPC_BIND_PORT == 0x8895
+
+    def test_uuid_epm_v4_importable_from_package(self):
+        """Test UUID_EPM_V4 can be imported from profinet package."""
+        from profinet import UUID_EPM_V4
+        assert UUID_EPM_V4 == "e1af8308-5d1f-11c9-91a4-08002b14a0fa"
+
+    def test_uuid_pnio_device_importable_from_package(self):
+        """Test UUID_PNIO_DEVICE can be imported from profinet package."""
+        from profinet import UUID_PNIO_DEVICE
+        assert UUID_PNIO_DEVICE == "dea00001-6c97-11d1-8271-00a02442df7d"
+
+    def test_uuid_pnio_controller_importable_from_package(self):
+        """Test UUID_PNIO_CONTROLLER can be imported from profinet package."""
+        from profinet import UUID_PNIO_CONTROLLER
+        assert UUID_PNIO_CONTROLLER == "dea00002-6c97-11d1-8271-00a02442df7d"

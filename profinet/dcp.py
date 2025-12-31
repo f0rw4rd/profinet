@@ -54,10 +54,14 @@ DCP_MULTICAST_MAC = "01:0e:cf:00:00:00"
 DCP_IDENTIFY_FRAME_ID = 0xFEFE
 DCP_GET_SET_FRAME_ID = 0xFEFD
 
+# DCP maximum name length (IEC 61158-6-10)
+DCP_MAX_NAME_LENGTH = 240
+
 # DCP Options
 DCP_OPTION_IP = 0x01
 DCP_OPTION_DEVICE = 0x02
 DCP_OPTION_DHCP = 0x03
+DCP_OPTION_LLDP = 0x04
 DCP_OPTION_CONTROL = 0x05
 DCP_OPTION_DEVICE_INITIATIVE = 0x06
 DCP_OPTION_NME = 0x07
@@ -116,6 +120,7 @@ DCP_OPTION_NAMES = {
     0x01: "IP",
     0x02: "Device",
     0x03: "DHCP",
+    0x04: "LLDP",
     0x05: "Control",
     0x06: "DeviceInitiative",
     0x07: "NME",
@@ -138,6 +143,7 @@ DCP_SUBOPTION_NAMES = {
         0x06: "Alias",
         0x07: "Instance",
         0x08: "OEM-ID",
+        0x09: "StandardGateway",
         0x0A: "RSI",
     },
     0x03: {  # DHCP
@@ -150,6 +156,16 @@ DCP_SUBOPTION_NAMES = {
         0x51: "FQDN",
         0x61: "UUID",
         0xFF: "Control",
+    },
+    0x04: {  # LLDP
+        0x01: "PortID",
+        0x02: "ChassisID",
+        0x03: "TTL",
+        0x04: "PortDescription",
+        0x05: "SystemName",
+        0x06: "SystemDescription",
+        0x07: "SystemCapabilities",
+        0x08: "ManagementAddress",
     },
     0x05: {  # Control
         0x01: "Start",
@@ -188,6 +204,34 @@ RESET_MODE_ENGINEERING = 0x0008   # Mode 3: Reset engineering data
 RESET_MODE_ALL_DATA = 0x0010      # Mode 4: Reset all data
 RESET_MODE_DEVICE = 0x0020        # Mode 8: Reset device
 RESET_MODE_FACTORY = 0x0040       # Mode 9: Reset to factory image
+
+
+class DCPResponseCode:
+    """DCP response/error codes (IEC 61158-6-10).
+
+    These codes are returned in DCP Set responses to indicate success or failure.
+    """
+
+    NO_ERROR = 0x00
+    OPTION_NOT_SUPPORTED = 0x01
+    SUBOPTION_NOT_SUPPORTED = 0x02
+    SUBOPTION_NOT_SET = 0x03
+    RESOURCE_ERROR = 0x04
+    SET_NOT_POSSIBLE = 0x05
+
+    NAMES = {
+        0x00: "No error",
+        0x01: "Option not supported",
+        0x02: "Suboption not supported or no DataSet available",
+        0x03: "Suboption not set",
+        0x04: "Resource error",
+        0x05: "Set not possible",
+    }
+
+    @classmethod
+    def get_name(cls, code: int) -> str:
+        """Get human-readable name for response code."""
+        return cls.NAMES.get(code, f"Unknown (0x{code:02X})")
 
 # Parameter name mappings
 PARAMS: Dict[str, Tuple[int, int]] = {
@@ -452,9 +496,16 @@ def set_param(
 
     Raises:
         DCPError: If parameter name is unknown
+        ValueError: If name exceeds DCP_MAX_NAME_LENGTH (240 chars)
     """
     if param not in PARAMS:
         raise DCPError(f"Unknown parameter: {param!r}. Valid: {list(PARAMS.keys())}")
+
+    # Validate name length per IEC 61158-6-10
+    if param == "name" and len(value) > DCP_MAX_NAME_LENGTH:
+        raise ValueError(
+            f"Station name exceeds maximum length: {len(value)} > {DCP_MAX_NAME_LENGTH}"
+        )
 
     dst = s2mac(target)
     param_tuple = PARAMS[param]

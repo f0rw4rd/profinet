@@ -626,3 +626,152 @@ class TestConstants:
     def test_multicast_address(self):
         """Test DCP multicast address constant."""
         assert DCP_MULTICAST_MAC == "01:0e:cf:00:00:00"
+
+
+from profinet.dcp import (
+    DCP_MAX_NAME_LENGTH,
+    DCP_OPTION_LLDP,
+    DCPResponseCode,
+)
+
+
+class TestDCPMaxNameLength:
+    """Test DCP_MAX_NAME_LENGTH constant."""
+
+    def test_max_name_length_value(self):
+        """Test max name length is 240 per IEC 61158-6-10."""
+        assert DCP_MAX_NAME_LENGTH == 240
+
+
+class TestDCPResponseCode:
+    """Test DCPResponseCode class."""
+
+    def test_no_error_value(self):
+        """Test NO_ERROR constant."""
+        assert DCPResponseCode.NO_ERROR == 0x00
+
+    def test_option_not_supported_value(self):
+        """Test OPTION_NOT_SUPPORTED constant."""
+        assert DCPResponseCode.OPTION_NOT_SUPPORTED == 0x01
+
+    def test_suboption_not_supported_value(self):
+        """Test SUBOPTION_NOT_SUPPORTED constant."""
+        assert DCPResponseCode.SUBOPTION_NOT_SUPPORTED == 0x02
+
+    def test_suboption_not_set_value(self):
+        """Test SUBOPTION_NOT_SET constant."""
+        assert DCPResponseCode.SUBOPTION_NOT_SET == 0x03
+
+    def test_resource_error_value(self):
+        """Test RESOURCE_ERROR constant."""
+        assert DCPResponseCode.RESOURCE_ERROR == 0x04
+
+    def test_set_not_possible_value(self):
+        """Test SET_NOT_POSSIBLE constant."""
+        assert DCPResponseCode.SET_NOT_POSSIBLE == 0x05
+
+    def test_get_name_known_code(self):
+        """Test get_name returns correct name for known codes."""
+        assert DCPResponseCode.get_name(0x00) == "No error"
+        assert DCPResponseCode.get_name(0x01) == "Option not supported"
+        assert DCPResponseCode.get_name(0x05) == "Set not possible"
+
+    def test_get_name_unknown_code(self):
+        """Test get_name returns hex for unknown codes."""
+        name = DCPResponseCode.get_name(0xFF)
+        assert "Unknown" in name
+        assert "0xFF" in name
+
+
+class TestDCPOptionLLDP:
+    """Test DCP_OPTION_LLDP constant."""
+
+    def test_lldp_option_value(self):
+        """Test LLDP option is 0x04."""
+        assert DCP_OPTION_LLDP == 0x04
+
+    def test_lldp_in_option_names(self):
+        """Test LLDP is in option names mapping."""
+        from profinet.dcp import DCP_OPTION_NAMES
+        assert 0x04 in DCP_OPTION_NAMES
+        assert DCP_OPTION_NAMES[0x04] == "LLDP"
+
+    def test_lldp_suboptions_defined(self):
+        """Test LLDP suboptions are defined."""
+        from profinet.dcp import DCP_SUBOPTION_NAMES
+        assert 0x04 in DCP_SUBOPTION_NAMES
+        lldp_subopts = DCP_SUBOPTION_NAMES[0x04]
+        assert 0x01 in lldp_subopts  # PortID
+        assert 0x02 in lldp_subopts  # ChassisID
+
+
+class TestSetParamNameLengthValidation:
+    """Test name length validation in set_param."""
+
+    def test_set_param_name_too_long(self):
+        """Test set_param raises ValueError for names > 240 chars."""
+        mock_sock = MagicMock()
+        long_name = "x" * 241
+
+        with pytest.raises(ValueError, match="exceeds maximum length"):
+            set_param(
+                mock_sock,
+                b"\x00\x11\x22\x33\x44\x55",
+                "AA:BB:CC:DD:EE:FF",
+                "name",
+                long_name
+            )
+
+    def test_set_param_name_at_limit(self):
+        """Test set_param accepts names at exactly 240 chars."""
+        mock_sock = MagicMock()
+        from socket import timeout as SocketTimeout
+        mock_sock.recv.side_effect = SocketTimeout()
+
+        max_name = "x" * 240
+        # Should not raise ValueError, but may timeout
+        result = set_param(
+            mock_sock,
+            b"\x00\x11\x22\x33\x44\x55",
+            "AA:BB:CC:DD:EE:FF",
+            "name",
+            max_name,
+            timeout_sec=1
+        )
+        # Even though it times out, it shouldn't have raised ValueError
+        assert result is False  # Timeout means no response
+
+    def test_set_param_name_under_limit(self):
+        """Test set_param accepts names under 240 chars."""
+        mock_sock = MagicMock()
+        from socket import timeout as SocketTimeout
+        mock_sock.recv.side_effect = SocketTimeout()
+
+        normal_name = "my-device-name"
+        result = set_param(
+            mock_sock,
+            b"\x00\x11\x22\x33\x44\x55",
+            "AA:BB:CC:DD:EE:FF",
+            "name",
+            normal_name,
+            timeout_sec=1
+        )
+        # Should execute without ValueError
+        assert result is False  # Timeout means no response
+
+    def test_set_param_ip_no_length_check(self):
+        """Test set_param for IP param doesn't apply name length check."""
+        mock_sock = MagicMock()
+        from socket import timeout as SocketTimeout
+        mock_sock.recv.side_effect = SocketTimeout()
+
+        # IP address value - should not trigger name length validation
+        result = set_param(
+            mock_sock,
+            b"\x00\x11\x22\x33\x44\x55",
+            "AA:BB:CC:DD:EE:FF",
+            "ip",
+            "192.168.1.100",
+            timeout_sec=1
+        )
+        assert result is False  # Timeout means no response
