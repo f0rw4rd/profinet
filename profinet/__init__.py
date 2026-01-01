@@ -39,17 +39,40 @@ from .protocol import (
 )
 
 from .dcp import (
+    # Classes
     DCPDeviceDescription,
     DCPResponseCode,
+    DCPDHCPBlock,
+    DCPLLDPBlock,
+    IPBlockInfo,
+    BlockQualifier,
+    ResetQualifier,
+    DeviceInitiative,
+    # Functions
     send_discover,
     send_request,
     read_response,
+    send_hello,
+    receive_hello,
     get_param,
     set_param,
     set_ip,
     signal_device,
     reset_to_factory,
-    # Constants
+    # Frame IDs
+    DCP_IDENTIFY_FRAME_ID,
+    DCP_GET_SET_FRAME_ID,
+    DCP_HELLO_FRAME_ID,
+    # Service IDs
+    DCP_SERVICE_ID_GET,
+    DCP_SERVICE_ID_SET,
+    DCP_SERVICE_ID_IDENTIFY,
+    DCP_SERVICE_ID_HELLO,
+    # Service Types
+    DCP_SERVICE_TYPE_REQUEST,
+    DCP_SERVICE_TYPE_RESPONSE_SUCCESS,
+    DCP_SERVICE_TYPE_RESPONSE_UNSUPPORTED,
+    # Options
     DCP_MAX_NAME_LENGTH,
     DCP_OPTION_IP,
     DCP_OPTION_DEVICE,
@@ -57,7 +80,33 @@ from .dcp import (
     DCP_OPTION_LLDP,
     DCP_OPTION_CONTROL,
     DCP_OPTION_DEVICE_INITIATIVE,
+    DCP_OPTION_NME,
     DCP_OPTION_ALL,
+    # Manufacturer options
+    DCP_OPTION_MANUF_MIN,
+    DCP_OPTION_MANUF_MAX,
+    # DHCP suboptions
+    DCP_SUBOPTION_DHCP_HOSTNAME,
+    DCP_SUBOPTION_DHCP_VENDOR_SPEC,
+    DCP_SUBOPTION_DHCP_SERVER_ID,
+    DCP_SUBOPTION_DHCP_PARAM_REQ,
+    DCP_SUBOPTION_DHCP_CLASS_ID,
+    DCP_SUBOPTION_DHCP_CLIENT_ID,
+    DCP_SUBOPTION_DHCP_FQDN,
+    DCP_SUBOPTION_DHCP_UUID,
+    DCP_SUBOPTION_DHCP_CONTROL,
+    # LLDP suboptions
+    DCP_SUBOPTION_LLDP_PORT_ID,
+    DCP_SUBOPTION_LLDP_CHASSIS_ID,
+    DCP_SUBOPTION_LLDP_TTL,
+    DCP_SUBOPTION_LLDP_PORT_DESC,
+    DCP_SUBOPTION_LLDP_SYSTEM_NAME,
+    DCP_SUBOPTION_LLDP_SYSTEM_DESC,
+    DCP_SUBOPTION_LLDP_SYSTEM_CAP,
+    DCP_SUBOPTION_LLDP_MGMT_ADDR,
+    # Device Initiative suboption
+    DCP_SUBOPTION_DEVICE_INITIATIVE,
+    # Legacy reset modes
     RESET_MODE_COMMUNICATION,
     RESET_MODE_APPLICATION,
     RESET_MODE_ENGINEERING,
@@ -80,6 +129,13 @@ from .rpc import (
     LogEntry,
     EPMEndpoint,
     MAU_TYPES,
+    # IOCR setup classes
+    IOSlot,
+    IOCRSetup,
+    ConnectResult,
+    # Python timing constants
+    PYTHON_MIN_CYCLE_TIME_MS,
+    PYTHON_SAFE_CYCLE_TIME_MS,
     # RPC Constants
     RPC_PORT,
     RPC_BIND_PORT,
@@ -140,6 +196,18 @@ from .blocks import (
     PeerInfo,
     PDRealData,
     RealIdentificationData,
+    # ModuleDiff
+    ModuleDiffBlock,
+    ModuleDiffModule,
+    ModuleDiffSubmodule,
+    # WriteMultiple
+    WriteMultipleResult,
+    IODWriteMultipleBuilder,
+    # ExpectedSubmodule
+    ExpectedSubmoduleBlockReq,
+    ExpectedSubmoduleAPI,
+    ExpectedSubmodule,
+    ExpectedSubmoduleDataDescription,
     # Parsing functions
     parse_block_header,
     parse_multiple_block_header,
@@ -148,6 +216,55 @@ from .blocks import (
     parse_pd_real_data,
     parse_real_identification_data,
     parse_port_statistics,
+    parse_module_diff_block,
+    parse_write_multiple_response,
+)
+
+from .alarms import (
+    # Alarm item types
+    AlarmItem,
+    DiagnosisItem,
+    MaintenanceItem,
+    UploadRetrievalItem,
+    iParameterItem,
+    PE_AlarmItem,
+    RS_AlarmItem,
+    PRAL_AlarmItem,
+    # Alarm notification
+    AlarmNotification,
+    # Parsing functions
+    parse_alarm_notification,
+    parse_alarm_item,
+)
+
+from .alarm_listener import (
+    AlarmListener,
+    AlarmEndpoint,
+)
+
+from .rt import (
+    RTFrame,
+    IOCRConfig,
+    IODataObject,
+    CyclicDataBuilder,
+    IOCR_TYPE_INPUT,
+    IOCR_TYPE_OUTPUT,
+    RT_CLASS_1,
+    IOXS_GOOD,
+    IOXS_BAD,
+)
+
+from .cyclic import (
+    CyclicController,
+    CyclicStats,
+)
+
+from .device import (
+    ProfinetDevice,
+    DeviceInfo,
+    WriteItem,
+    scan,
+    scan_dict,
 )
 
 from .exceptions import (
@@ -188,18 +305,40 @@ __all__ = [
     "PNInM3",
     "PNInM4",
     "PNInM5",
-    # DCP functions
+    # DCP classes
     "DCPDeviceDescription",
     "DCPResponseCode",
+    "DCPDHCPBlock",
+    "DCPLLDPBlock",
+    "IPBlockInfo",
+    "BlockQualifier",
+    "ResetQualifier",
+    "DeviceInitiative",
+    # DCP functions
     "send_discover",
     "send_request",
     "read_response",
+    "send_hello",
+    "receive_hello",
     "get_param",
     "set_param",
     "set_ip",
     "signal_device",
     "reset_to_factory",
-    # DCP constants
+    # DCP Frame IDs
+    "DCP_IDENTIFY_FRAME_ID",
+    "DCP_GET_SET_FRAME_ID",
+    "DCP_HELLO_FRAME_ID",
+    # DCP Service IDs
+    "DCP_SERVICE_ID_GET",
+    "DCP_SERVICE_ID_SET",
+    "DCP_SERVICE_ID_IDENTIFY",
+    "DCP_SERVICE_ID_HELLO",
+    # DCP Service Types
+    "DCP_SERVICE_TYPE_REQUEST",
+    "DCP_SERVICE_TYPE_RESPONSE_SUCCESS",
+    "DCP_SERVICE_TYPE_RESPONSE_UNSUPPORTED",
+    # DCP Options
     "DCP_MAX_NAME_LENGTH",
     "DCP_OPTION_IP",
     "DCP_OPTION_DEVICE",
@@ -207,8 +346,32 @@ __all__ = [
     "DCP_OPTION_LLDP",
     "DCP_OPTION_CONTROL",
     "DCP_OPTION_DEVICE_INITIATIVE",
+    "DCP_OPTION_NME",
     "DCP_OPTION_ALL",
-    # Reset modes
+    "DCP_OPTION_MANUF_MIN",
+    "DCP_OPTION_MANUF_MAX",
+    # DCP DHCP suboptions
+    "DCP_SUBOPTION_DHCP_HOSTNAME",
+    "DCP_SUBOPTION_DHCP_VENDOR_SPEC",
+    "DCP_SUBOPTION_DHCP_SERVER_ID",
+    "DCP_SUBOPTION_DHCP_PARAM_REQ",
+    "DCP_SUBOPTION_DHCP_CLASS_ID",
+    "DCP_SUBOPTION_DHCP_CLIENT_ID",
+    "DCP_SUBOPTION_DHCP_FQDN",
+    "DCP_SUBOPTION_DHCP_UUID",
+    "DCP_SUBOPTION_DHCP_CONTROL",
+    # DCP LLDP suboptions
+    "DCP_SUBOPTION_LLDP_PORT_ID",
+    "DCP_SUBOPTION_LLDP_CHASSIS_ID",
+    "DCP_SUBOPTION_LLDP_TTL",
+    "DCP_SUBOPTION_LLDP_PORT_DESC",
+    "DCP_SUBOPTION_LLDP_SYSTEM_NAME",
+    "DCP_SUBOPTION_LLDP_SYSTEM_DESC",
+    "DCP_SUBOPTION_LLDP_SYSTEM_CAP",
+    "DCP_SUBOPTION_LLDP_MGMT_ADDR",
+    # DCP DeviceInitiative suboption
+    "DCP_SUBOPTION_DEVICE_INITIATIVE",
+    # Reset modes (legacy)
     "RESET_MODE_COMMUNICATION",
     "RESET_MODE_APPLICATION",
     "RESET_MODE_ENGINEERING",
@@ -220,6 +383,13 @@ __all__ = [
     "get_station_info",
     "epm_lookup",
     "EPMEndpoint",
+    # IOCR setup classes
+    "IOSlot",
+    "IOCRSetup",
+    "ConnectResult",
+    # Python timing constants
+    "PYTHON_MIN_CYCLE_TIME_MS",
+    "PYTHON_SAFE_CYCLE_TIME_MS",
     # RPC constants
     "RPC_PORT",
     "RPC_BIND_PORT",
@@ -264,6 +434,15 @@ __all__ = [
     "PeerInfo",
     "PDRealData",
     "RealIdentificationData",
+    "ModuleDiffBlock",
+    "ModuleDiffModule",
+    "ModuleDiffSubmodule",
+    "WriteMultipleResult",
+    "IODWriteMultipleBuilder",
+    "ExpectedSubmoduleBlockReq",
+    "ExpectedSubmoduleAPI",
+    "ExpectedSubmodule",
+    "ExpectedSubmoduleDataDescription",
     "parse_block_header",
     "parse_multiple_block_header",
     "parse_pd_interface_data_real",
@@ -271,6 +450,41 @@ __all__ = [
     "parse_pd_real_data",
     "parse_real_identification_data",
     "parse_port_statistics",
+    "parse_module_diff_block",
+    "parse_write_multiple_response",
+    # Alarms module
+    "AlarmItem",
+    "DiagnosisItem",
+    "MaintenanceItem",
+    "UploadRetrievalItem",
+    "iParameterItem",
+    "PE_AlarmItem",
+    "RS_AlarmItem",
+    "PRAL_AlarmItem",
+    "AlarmNotification",
+    "parse_alarm_notification",
+    "parse_alarm_item",
+    # Alarm listener
+    "AlarmListener",
+    "AlarmEndpoint",
+    # Real-time (cyclic IO)
+    "RTFrame",
+    "IOCRConfig",
+    "IODataObject",
+    "CyclicDataBuilder",
+    "CyclicController",
+    "CyclicStats",
+    "IOCR_TYPE_INPUT",
+    "IOCR_TYPE_OUTPUT",
+    "RT_CLASS_1",
+    "IOXS_GOOD",
+    "IOXS_BAD",
+    # Device module (high-level API)
+    "ProfinetDevice",
+    "DeviceInfo",
+    "WriteItem",
+    "scan",
+    "scan_dict",
     # Exceptions
     "ProfinetError",
     "DCPError",

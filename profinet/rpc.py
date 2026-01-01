@@ -14,9 +14,10 @@ Credits:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from socket import AF_INET, SOCK_DGRAM, socket, timeout as SocketTimeout
-from struct import unpack
+from struct import pack, unpack
 from typing import Any, Dict, Optional, Tuple
 
 from . import dcp
@@ -33,18 +34,33 @@ from typing import List
 
 from .protocol import (
     PNARBlockRequest,
+    PNAlarmCRBlockReq,
+    PNAlarmCRBlockRes,
     PNBlockHeader,
     PNDCPBlock,
     PNIODHeader,
     PNIODReleaseBlock,
     PNNRDData,
     PNRPCHeader,
+    PNIOCRBlockReqHeader,
+    PNIOCRBlockRes,
+    IOCRAPIObject,
     PNInM0,
     PNInM1,
     PNInM2,
     PNInM3,
     PNInM4,
     PNInM5,
+    PNInM6,
+    PNInM7,
+    PNInM8,
+    PNInM9,
+    PNInM10,
+    PNInM11,
+    PNInM12,
+    PNInM13,
+    PNInM14,
+    PNInM15,
 )
 from .diagnosis import (
     DiagnosisData,
@@ -61,6 +77,14 @@ from .diagnosis import (
 )
 from . import indices
 from . import blocks
+from .blocks import (
+    ModuleDiffBlock,
+    WriteMultipleResult,
+    IODWriteMultipleBuilder,
+    parse_module_diff_block,
+    parse_write_multiple_response,
+    ExpectedSubmoduleBlockReq,
+)
 
 
 # =============================================================================
@@ -347,6 +371,160 @@ def _parse_epm_tower(tower_data: bytes) -> Optional[EPMEndpoint]:
         return None
 
 
+# =============================================================================
+# IOCR (Cyclic IO) Configuration Data Classes
+# =============================================================================
+
+
+@dataclass
+class IOSlot:
+    """Single IO slot/subslot for cyclic data exchange."""
+
+    slot: int
+    """Slot number."""
+
+    subslot: int
+    """Subslot number."""
+
+    input_length: int = 0
+    """Input data length (device -> controller). 0 = no input."""
+
+    output_length: int = 0
+    """Output data length (controller -> device). 0 = no output."""
+
+    module_ident: int = 0
+    """Module identification number (from device discovery)."""
+
+    submodule_ident: int = 0
+    """Submodule identification number (from device discovery)."""
+
+
+# Minimum recommended cycle time for Python (due to GIL and OS scheduling)
+PYTHON_MIN_CYCLE_TIME_MS = 8
+
+# Safe default cycle time that works reliably with Python
+PYTHON_SAFE_CYCLE_TIME_MS = 32
+
+
+@dataclass
+class IOCRSetup:
+    """Configuration for IOCR (IO Connection Relationship) setup.
+
+    Used to configure cyclic IO exchange when establishing an AR.
+
+    WARNING: EXPERIMENTAL - NOT TESTED WITH REAL DEVICES
+    =====================================================
+    This feature has NOT been tested with real PROFINET devices.
+    The IOCR block building and cyclic IO exchange may not work
+    correctly. Use at your own risk. Contributions and test
+    reports are welcome.
+
+    WARNING: Python Timing Limitations
+    ==================================
+    Due to Python's Global Interpreter Lock (GIL) and OS scheduling,
+    reliable cyclic IO timing below 8ms is NOT achievable in pure Python.
+
+    Recommended cycle times:
+    - 32ms (default): Safe, works reliably on all systems
+    - 16ms: Works on most systems with low CPU load
+    - 8ms:  Minimum practical value, may have jitter under load
+
+    Cycle times below 8ms will likely result in:
+    - Missed frames and watchdog timeouts
+    - High CPU usage from busy-waiting
+    - Unstable communication with the device
+
+    For sub-millisecond timing, use hardware-based solutions or
+    real-time operating systems with C/C++ implementations.
+    """
+
+    slots: List[IOSlot]
+    """List of IO slots to include in cyclic exchange."""
+
+    send_clock_factor: int = 32
+    """Base clock multiplier. 32 = 1ms base clock (31.25µs * 32 = 1ms).
+    Do not change unless you understand PROFINET timing requirements."""
+
+    reduction_ratio: int = 32
+    """Cycle time = send_clock_factor * reduction_ratio * 31.25µs.
+    Default: 32 * 32 * 31.25µs = 32ms (safe for Python).
+
+    Common values:
+    - 32: 32ms cycle (default, recommended for Python)
+    - 16: 16ms cycle
+    - 8:  8ms cycle (minimum practical for Python)
+    - 4:  4ms cycle (may have issues in Python)
+    - 1:  1ms cycle (NOT recommended for Python - use C/C++)
+    """
+
+    watchdog_factor: int = 6
+    """Watchdog timeout = watchdog_factor * cycle_time.
+    Default: 6 (gives 192ms timeout with 32ms cycle).
+    Higher values tolerate more jitter but slower failure detection."""
+
+    data_hold_factor: int = 6
+    """Data hold time = data_hold_factor * cycle_time.
+    Default: 6 (matches watchdog for consistency)."""
+
+    @property
+    def cycle_time_us(self) -> int:
+        """Calculate cycle time in microseconds."""
+        return (self.reduction_ratio * self.send_clock_factor * 125) // 4
+
+    @property
+    def cycle_time_ms(self) -> float:
+        """Calculate cycle time in milliseconds."""
+        return self.cycle_time_us / 1000.0
+
+    def validate(self) -> List[str]:
+        """Validate configuration and return list of warnings."""
+        warnings = []
+        cycle_ms = self.cycle_time_ms
+
+        if cycle_ms < 1:
+            warnings.append(f"Cycle {cycle_ms:.2f}ms too fast - Python can't do <1ms")
+        elif cycle_ms < PYTHON_MIN_CYCLE_TIME_MS:
+            warnings.append(f"Cycle {cycle_ms:.0f}ms may cause jitter (use {PYTHON_MIN_CYCLE_TIME_MS}ms+)")
+
+        if self.watchdog_factor < 3:
+            warnings.append(f"Watchdog factor {self.watchdog_factor} too low (use 6+)")
+
+        if not self.slots:
+            warnings.append("No IO slots configured")
+
+        return warnings
+
+    def __post_init__(self):
+        """Log warnings after initialization."""
+        for warning in self.validate():
+            logger.warning(f"IOCRSetup: {warning}")
+
+
+@dataclass
+class ConnectResult:
+    """Result from AR CONNECT with IOCR support."""
+
+    ar_uuid: bytes = b""
+    """AR UUID assigned by device."""
+
+    session_key: int = 0
+    """Session key for this AR."""
+
+    input_frame_id: int = 0
+    """Frame ID for input IOCR (device -> controller). 0 = not established."""
+
+    output_frame_id: int = 0
+    """Frame ID for output IOCR (controller -> device). 0 = not established."""
+
+    device_alarm_ref: int = 0
+    """Device's alarm reference (if AlarmCR established)."""
+
+    @property
+    def has_cyclic(self) -> bool:
+        """True if cyclic IO was established."""
+        return self.input_frame_id != 0 or self.output_frame_id != 0
+
+
 def epm_lookup(
     ip: str,
     port: int = RPC_PORT,
@@ -615,12 +793,9 @@ class RPCCon:
         self.timeout = timeout
         self.peer = (info.ip, RPC_PORT)
 
-        # UUIDs for this connection
-        self.ar_uuid = bytes(
-            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-             0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
-        )
-        self.activity_uuid = self.ar_uuid
+        # UUIDs for this connection (must be random per IEC 61158)
+        self.ar_uuid = os.urandom(16)
+        self.activity_uuid = os.urandom(16)
 
         # Object UUIDs (local and remote)
         self.local_object_uuid = PNRPCHeader.OBJECT_UUID_PREFIX + bytes(
@@ -635,6 +810,19 @@ class RPCCon:
         self.live: Optional[datetime] = None
         self.src_mac: Optional[bytes] = None
         self.session_key: int = 1  # Session key for AR (default 1)
+
+        # AlarmCR state
+        self._alarm_ref: int = 1  # Controller's local alarm reference
+        self._device_alarm_ref: int = 0  # Device's alarm reference (set after connect)
+        self._alarm_cr_enabled: bool = False  # Whether AlarmCR was established
+
+        # IOCR state
+        self._iocr_ref_counter: int = 1  # Counter for IOCR references
+        self._input_iocr_ref: int = 0  # Input IOCR reference
+        self._output_iocr_ref: int = 0  # Output IOCR reference
+        self._input_frame_id: int = 0  # Assigned input frame ID
+        self._output_frame_id: int = 0  # Assigned output frame ID
+        self._iocr_setup: Optional[IOCRSetup] = None  # IOCR config if enabled
 
         # UDP socket for RPC with timeout
         self._socket = socket(AF_INET, SOCK_DGRAM)
@@ -675,6 +863,237 @@ class RPCCon:
             len(payload),  # actual_count
             payload=payload,
         )
+
+    def _build_alarm_cr_block(
+        self,
+        transport: int = 0,
+        priority: int = 0,
+    ) -> bytes:
+        """Build AlarmCRBlockReq (0x0103) for AR establishment.
+
+        Per IEC 61158-6-10, the AlarmCR (Alarm Connection Relationship)
+        enables asynchronous alarm notifications from device to controller.
+
+        Args:
+            transport: 0=Layer2 (RTA over Ethernet), 1=UDP
+            priority: 0=low priority alarms, 1=high priority alarms
+
+        Returns:
+            Serialized AlarmCRBlockReq bytes
+        """
+        # AlarmCRProperties: bit 0=priority, bit 1=transport
+        properties = (transport << 1) | priority
+
+        # Block header: type 0x0103, length = total - 4 (excludes type+length)
+        # AlarmCRBlockReq fixed size = 26 bytes, header contributes 6
+        block_length = PNAlarmCRBlockReq.fmt_size - 4  # 22 bytes
+        block = PNBlockHeader(
+            PNAlarmCRBlockReq.BLOCK_TYPE,
+            block_length,
+            0x01,  # version high
+            0x00,  # version low
+        )
+
+        alarm_cr = PNAlarmCRBlockReq(
+            block_header=bytes(block),
+            alarm_cr_type=0x0001,  # Standard AlarmCR
+            lt=0x8892 if transport == 0 else 0x0800,  # EtherType or IP
+            alarm_cr_properties=properties,
+            rta_timeout_factor=PNAlarmCRBlockReq.DEFAULT_RTA_TIMEOUT_FACTOR,
+            rta_retries=PNAlarmCRBlockReq.DEFAULT_RTA_RETRIES,
+            local_alarm_reference=self._alarm_ref,
+            max_alarm_data_length=PNAlarmCRBlockReq.DEFAULT_MAX_ALARM_DATA_LENGTH,
+            alarm_cr_tag_header_high=PNAlarmCRBlockReq.DEFAULT_TAG_HEADER_HIGH,
+            alarm_cr_tag_header_low=PNAlarmCRBlockReq.DEFAULT_TAG_HEADER_LOW,
+        )
+
+        return bytes(alarm_cr)
+
+    def _parse_alarm_cr_response(self, response_data: bytes) -> int:
+        """Parse AlarmCRBlockRes from connect response.
+
+        Args:
+            response_data: NRD payload containing response blocks
+
+        Returns:
+            Device's local alarm reference, or 0 if not found
+        """
+        # Scan for block type 0x8103 (AlarmCRBlockRes)
+        offset = 0
+        while offset + 6 <= len(response_data):
+            block_type = unpack(">H", response_data[offset:offset + 2])[0]
+            block_length = unpack(">H", response_data[offset + 2:offset + 4])[0]
+
+            if block_type == PNAlarmCRBlockRes.BLOCK_TYPE:
+                # Found AlarmCRBlockRes
+                try:
+                    alarm_res = PNAlarmCRBlockRes(response_data[offset:])
+                    return alarm_res.local_alarm_reference
+                except (ValueError, IndexError):
+                    pass
+
+            # Move to next block (block_length + 4 for header)
+            offset += 4 + block_length
+            # Align to 4 bytes
+            offset = (offset + 3) & ~3
+
+        return 0
+
+    def _build_iocr_block(
+        self,
+        iocr_type: int,
+        iocr_reference: int,
+        setup: IOCRSetup,
+    ) -> bytes:
+        """Build IOCRBlockReq (0x0102) for AR establishment.
+
+        Per IEC 61158-6-10, IOCRs define cyclic data exchange channels.
+        Input IOCR: device -> controller
+        Output IOCR: controller -> device
+
+        Args:
+            iocr_type: 1=Input, 2=Output
+            iocr_reference: Local IOCR reference number
+            setup: IOCRSetup with timing and slot configuration
+
+        Returns:
+            Serialized IOCRBlockReq bytes
+        """
+        # Calculate frame offset for each slot
+        # Each IO object: data + IOPS byte
+        objects_data = b""
+        frame_offset = 0
+
+        for slot in setup.slots:
+            if iocr_type == 1:  # Input IOCR
+                data_len = slot.input_length
+            else:  # Output IOCR
+                data_len = slot.output_length
+
+            if data_len > 0:
+                obj = IOCRAPIObject(
+                    slot_number=slot.slot,
+                    subslot_number=slot.subslot,
+                    frame_offset=frame_offset,
+                )
+                objects_data += bytes(obj)
+                frame_offset += data_len + 1  # data + IOPS
+
+        # Pad to minimum 40 bytes
+        data_length = max(40, frame_offset)
+
+        # IOCR properties: RT_CLASS_1 = 0x01
+        iocr_properties = 0x00000001  # RT_CLASS_1
+
+        # Number of objects
+        num_objects = len([s for s in setup.slots if
+                          (iocr_type == 1 and s.input_length > 0) or
+                          (iocr_type == 2 and s.output_length > 0)])
+
+        # Build IOCRAPI per IEC 61158-6-10:
+        # API(4) + nbr_io_data(2) + io_data[] + nbr_iocs(2) + iocs[]
+        api_block = pack(">I", 0)  # API = 0
+        api_block += pack(">H", num_objects)  # Number of IO data objects
+        api_block += objects_data  # Frame descriptors for IO data
+        # Add IOCS objects (consumer status - we don't typically need these)
+        api_block += pack(">H", 0)  # Number of IOCS objects (none)
+
+        # Calculate block length: header(38) + api_block
+        header_size = PNIOCRBlockReqHeader.fmt_size
+        total_size = header_size + len(api_block)
+        block_length = total_size - 4  # Exclude type + length fields
+
+        block = PNBlockHeader(
+            PNIOCRBlockReqHeader.BLOCK_TYPE,
+            block_length,
+            0x01,  # version high
+            0x00,  # version low
+        )
+
+        iocr_header = PNIOCRBlockReqHeader(
+            block_header=bytes(block),
+            iocr_type=iocr_type,
+            iocr_reference=iocr_reference,
+            lt=0x8892,  # PROFINET EtherType
+            iocr_properties=iocr_properties,
+            data_length=data_length,
+            frame_id=0x8000 + iocr_reference,  # Placeholder, device assigns
+            send_clock_factor=setup.send_clock_factor,
+            reduction_ratio=setup.reduction_ratio,
+            phase=0,
+            sequence=0,
+            frame_send_offset=0xFFFFFFFF,
+            watchdog_factor=setup.watchdog_factor,
+            data_hold_factor=setup.data_hold_factor,
+            iocr_tag_header=0xC000,
+            iocr_multicast_mac=bytes(6),
+            number_of_apis=1,
+        )
+
+        return bytes(iocr_header) + api_block
+
+    def _build_expected_submodule_block(
+        self,
+        setup: IOCRSetup,
+    ) -> bytes:
+        """Build ExpectedSubmoduleBlockReq (0x0104) for AR establishment.
+
+        Tells the device what modules/submodules we expect.
+
+        Args:
+            setup: IOCRSetup with slot configuration
+
+        Returns:
+            Serialized ExpectedSubmoduleBlockReq bytes
+        """
+        builder = ExpectedSubmoduleBlockReq()
+
+        for slot_cfg in setup.slots:
+            builder.add_submodule(
+                api=0,
+                slot=slot_cfg.slot,
+                subslot=slot_cfg.subslot,
+                module_ident=slot_cfg.module_ident,
+                submodule_ident=slot_cfg.submodule_ident,
+                input_length=slot_cfg.input_length,
+                output_length=slot_cfg.output_length,
+            )
+
+        return builder.to_bytes()
+
+    def _parse_iocr_response(
+        self,
+        response_data: bytes,
+        iocr_type: int,
+    ) -> int:
+        """Parse IOCRBlockRes from connect response.
+
+        Args:
+            response_data: NRD payload containing response blocks
+            iocr_type: IOCR type to find (1=input, 2=output)
+
+        Returns:
+            Assigned frame ID, or 0 if not found
+        """
+        # Scan for block type 0x8102 (IOCRBlockRes)
+        offset = 0
+        while offset + 6 <= len(response_data):
+            block_type = unpack(">H", response_data[offset:offset + 2])[0]
+            block_length = unpack(">H", response_data[offset + 2:offset + 4])[0]
+
+            if block_type == PNIOCRBlockRes.BLOCK_TYPE:
+                try:
+                    iocr_res = PNIOCRBlockRes(response_data[offset:])
+                    if iocr_res.iocr_type == iocr_type:
+                        return iocr_res.frame_id
+                except (ValueError, IndexError):
+                    pass
+
+            # Move to next block
+            offset += 4 + block_length
+            offset = (offset + 3) & ~3  # Align to 4 bytes
+
+        return 0
 
     def _send_receive(self, rpc: PNRPCHeader) -> PNRPCHeader:
         """Send RPC request and receive response with validation.
@@ -730,11 +1149,25 @@ class RPCCon:
                 logger.debug("Connection timeout, reconnecting...")
                 self.connect()
 
-    def connect(self, src_mac: Optional[bytes] = None) -> None:
+    def connect(
+        self,
+        src_mac: Optional[bytes] = None,
+        with_alarm_cr: bool = False,
+        iocr_setup: Optional[IOCRSetup] = None,
+    ) -> Optional[ConnectResult]:
         """Establish AR (Application Relationship) with device.
 
         Args:
             src_mac: Source MAC address (required for first connect)
+            with_alarm_cr: Enable AlarmCR for async alarm notifications (default: False)
+                          Note: Not all devices support AlarmCR. Enable only if your
+                          device supports async alarm notifications.
+            iocr_setup: Optional IOCR configuration for cyclic IO exchange.
+                       If provided, Input/Output IOCRs are established along with
+                       the AR. The device assigns frame IDs returned in ConnectResult.
+
+        Returns:
+            ConnectResult with frame IDs if iocr_setup provided, None otherwise
 
         Raises:
             ValueError: If src_mac not provided on first connect
@@ -749,6 +1182,16 @@ class RPCCon:
 
         if self.src_mac is None:
             raise ValueError("No source MAC address available")
+
+        # Store IOCR setup for later use
+        self._iocr_setup = iocr_setup
+
+        # Warn about experimental IOCR feature
+        if iocr_setup:
+            logger.warning(
+                "IOCR/Cyclic IO is EXPERIMENTAL and NOT TESTED with real devices. "
+                "Use at your own risk."
+            )
 
         # Create AR block request
         block = PNBlockHeader(
@@ -773,12 +1216,80 @@ class RPCCon:
             payload=bytes(),
         )
 
-        nrd = self._create_nrd(bytes(ar))
+        # Build NRD payload with AR block
+        nrd_payload = bytes(ar)
+
+        # Add IOCR blocks if cyclic IO requested
+        if iocr_setup:
+            # Input IOCR: device -> controller
+            self._input_iocr_ref = self._iocr_ref_counter
+            self._iocr_ref_counter += 1
+            input_iocr = self._build_iocr_block(
+                iocr_type=1,  # Input
+                iocr_reference=self._input_iocr_ref,
+                setup=iocr_setup,
+            )
+            nrd_payload += input_iocr
+
+            # Output IOCR: controller -> device
+            self._output_iocr_ref = self._iocr_ref_counter
+            self._iocr_ref_counter += 1
+            output_iocr = self._build_iocr_block(
+                iocr_type=2,  # Output
+                iocr_reference=self._output_iocr_ref,
+                setup=iocr_setup,
+            )
+            nrd_payload += output_iocr
+
+            # ExpectedSubmoduleBlockReq tells device what modules we expect
+            expected_submodule = self._build_expected_submodule_block(iocr_setup)
+            nrd_payload += expected_submodule
+
+        # Add AlarmCR block if requested
+        if with_alarm_cr:
+            alarm_cr_data = self._build_alarm_cr_block()
+            nrd_payload += alarm_cr_data
+
+        nrd = self._create_nrd(nrd_payload)
         rpc = self._create_rpc(PNRPCHeader.CONNECT, bytes(nrd))
 
         try:
-            self._send_receive(rpc)
+            rpc_resp = self._send_receive(rpc)
+            nrd_resp = PNNRDData(rpc_resp.payload)
+
+            # Parse IOCR responses if cyclic IO enabled
+            result = None
+            if iocr_setup:
+                result = ConnectResult(
+                    ar_uuid=self.ar_uuid,
+                    session_key=0x1234,
+                )
+                # Parse input IOCR response for frame ID
+                self._input_frame_id = self._parse_iocr_response(nrd_resp.payload, 1)
+                result.input_frame_id = self._input_frame_id
+                if self._input_frame_id > 0:
+                    logger.debug(f"Input IOCR frame ID: 0x{self._input_frame_id:04X}")
+
+                # Parse output IOCR response for frame ID
+                self._output_frame_id = self._parse_iocr_response(nrd_resp.payload, 2)
+                result.output_frame_id = self._output_frame_id
+                if self._output_frame_id > 0:
+                    logger.debug(f"Output IOCR frame ID: 0x{self._output_frame_id:04X}")
+
+            # Parse AlarmCR response if enabled
+            if with_alarm_cr:
+                self._device_alarm_ref = self._parse_alarm_cr_response(nrd_resp.payload)
+                if self._device_alarm_ref > 0:
+                    self._alarm_cr_enabled = True
+                    logger.debug(f"AlarmCR established, device ref: {self._device_alarm_ref}")
+                    if result:
+                        result.device_alarm_ref = self._device_alarm_ref
+                else:
+                    logger.debug("AlarmCR not acknowledged by device")
+
             logger.info(f"Connected to {self.info.name} ({self.info.ip})")
+            return result
+
         except RPCError as e:
             raise RPCConnectionError(f"Failed to connect: {e}") from e
 
@@ -938,6 +1449,106 @@ class RPCCon:
 
         logger.debug(f"Write to slot={slot} subslot={subslot} idx=0x{idx:04X} OK")
 
+    def write_multiple(
+        self,
+        writes: List[Tuple[int, int, int, bytes, int]],
+    ) -> List[WriteMultipleResult]:
+        """Write multiple records atomically using IODWriteMultipleReq (0xE040).
+
+        All writes are sent in a single RPC request and processed atomically.
+        This is more efficient than multiple single writes and ensures consistency.
+
+        Args:
+            writes: List of (slot, subslot, index, data, api) tuples.
+                   Use api=0 for most cases.
+
+        Returns:
+            List of WriteMultipleResult, one per write request.
+
+        Raises:
+            RPCTimeoutError: If no response
+            RPCError: If write operation fails
+
+        Example:
+            >>> results = conn.write_multiple([
+            ...     (0, 1, 0xAFF1, b"Function\\x00" * 4, 0),  # I&M1
+            ...     (0, 1, 0xAFF2, b"2024-01-15 10:30" + b"\\x00", 0),  # I&M2
+            ... ])
+            >>> for r in results:
+            ...     print(f"Write to 0x{r.index:04X}: {'OK' if r.success else 'FAIL'}")
+        """
+        self._check_timeout()
+
+        if not writes:
+            return []
+
+        # Build IODWriteMultipleReq using builder
+        builder = IODWriteMultipleBuilder(self.ar_uuid, seq_num=0)
+        for slot, subslot, index, data, api in writes:
+            builder.add_write(slot, subslot, index, data, api)
+
+        payload = builder.build()
+
+        # Use write() infrastructure but with special index 0xE040
+        block = PNBlockHeader(0x0008, 60, 0x01, 0x00)  # IODWriteReqHeader
+        iod = PNIODHeader(
+            bytes(block),
+            0,
+            self.ar_uuid,
+            0xFFFFFFFF,  # API wildcard for multiple
+            0xFFFF,  # Slot wildcard
+            0xFFFF,  # Subslot wildcard
+            0,
+            IODWriteMultipleBuilder.INDEX,  # 0xE040
+            len(payload),
+            bytes(16),
+            bytes(8),
+            payload=payload,
+        )
+
+        nrd = self._create_nrd(bytes(iod))
+        rpc = self._create_rpc(PNRPCHeader.WRITE, bytes(nrd))
+
+        rpc_resp = self._send_receive(rpc)
+        nrd_resp = PNNRDData(rpc_resp.payload)
+
+        # Check for PNIO errors
+        args_status = nrd_resp.args_maximum_status
+        if args_status != 0:
+            raise PNIOError.from_args_status(args_status)
+
+        # Parse individual results
+        results = parse_write_multiple_response(nrd_resp.payload)
+
+        logger.debug(f"WriteMultiple: {len(results)} writes, "
+                    f"{sum(1 for r in results if r.success)} succeeded")
+
+        return results
+
+    def read_module_diff(self) -> ModuleDiffBlock:
+        """Read and parse ModuleDiffBlock (0xF830) from device.
+
+        ModuleDiffBlock shows the comparison between expected and real
+        module/submodule configuration. Useful for verifying that the
+        device configuration matches expectations after Connect.
+
+        Returns:
+            ModuleDiffBlock with per-module/submodule state info
+
+        Raises:
+            RPCError: If read fails
+
+        Example:
+            >>> diff = conn.read_module_diff()
+            >>> if diff.all_ok:
+            ...     print("Configuration matches!")
+            >>> else:
+            ...     for slot, subslot, state in diff.get_mismatches():
+            ...         print(f"Mismatch at slot={slot} subslot={subslot}: {state}")
+        """
+        iod = self.read(api=0, slot=0, subslot=0, idx=indices.MODULE_DIFF_BLOCK)
+        return parse_module_diff_block(iod.payload)
+
     def read_inm0filter(self) -> Dict[int, Dict[int, Tuple[int, Dict[int, int]]]]:
         """Read IM0 filter data (module/submodule enumeration).
 
@@ -1087,6 +1698,106 @@ class RPCCon:
         iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM5.IDX)
         return PNInM5(iod.payload)
 
+    def read_im6(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM6:
+        """Read I&M6 data (reserved for future use).
+
+        Note: I&M6 is reserved and may not be supported by devices.
+
+        Args:
+            slot: Slot number (default: 0)
+            subslot: Subslot number (default: 1)
+
+        Returns:
+            PNInM6 structure with raw payload
+        """
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM6.IDX)
+        return PNInM6(iod.payload)
+
+    def read_im7(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM7:
+        """Read I&M7 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM7.IDX)
+        return PNInM7(iod.payload)
+
+    def read_im8(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM8:
+        """Read I&M8 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM8.IDX)
+        return PNInM8(iod.payload)
+
+    def read_im9(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM9:
+        """Read I&M9 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM9.IDX)
+        return PNInM9(iod.payload)
+
+    def read_im10(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM10:
+        """Read I&M10 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM10.IDX)
+        return PNInM10(iod.payload)
+
+    def read_im11(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM11:
+        """Read I&M11 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM11.IDX)
+        return PNInM11(iod.payload)
+
+    def read_im12(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM12:
+        """Read I&M12 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM12.IDX)
+        return PNInM12(iod.payload)
+
+    def read_im13(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM13:
+        """Read I&M13 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM13.IDX)
+        return PNInM13(iod.payload)
+
+    def read_im14(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM14:
+        """Read I&M14 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM14.IDX)
+        return PNInM14(iod.payload)
+
+    def read_im15(
+        self,
+        slot: int = 0,
+        subslot: int = 1,
+    ) -> PNInM15:
+        """Read I&M15 data (reserved for future use)."""
+        iod = self.read(api=0, slot=slot, subslot=subslot, idx=PNInM15.IDX)
+        return PNInM15(iod.payload)
+
     def read_all_im(
         self,
         slot: int = 0,
@@ -1094,7 +1805,7 @@ class RPCCon:
     ) -> Dict[str, Any]:
         """Read all available I&M records from device.
 
-        Attempts to read I&M0-5 records, returning only those supported.
+        Attempts to read I&M0-15 records, returning only those supported.
 
         Args:
             slot: Slot number (default: 0)
@@ -1117,13 +1828,24 @@ class RPCCon:
         except RPCError:
             logger.debug("I&M1 not supported")
 
-        # I&M2-5 are optional
-        for idx, (name, reader) in enumerate([
+        # I&M2-15 are optional (I&M6-15 are reserved for future use)
+        optional_im = [
             ("im2", self.read_im2),
             ("im3", self.read_im3),
             ("im4", self.read_im4),
             ("im5", self.read_im5),
-        ], start=2):
+            ("im6", self.read_im6),
+            ("im7", self.read_im7),
+            ("im8", self.read_im8),
+            ("im9", self.read_im9),
+            ("im10", self.read_im10),
+            ("im11", self.read_im11),
+            ("im12", self.read_im12),
+            ("im13", self.read_im13),
+            ("im14", self.read_im14),
+            ("im15", self.read_im15),
+        ]
+        for idx, (name, reader) in enumerate(optional_im, start=2):
             try:
                 result[name] = reader(slot, subslot)
             except (RPCError, ValueError):
@@ -1750,6 +2472,127 @@ class RPCCon:
         pd_real = self.read_pd_real_data()
         real_id = self.read_real_identification_data()
         return pd_real, real_id
+
+    # =========================================================================
+    # CONTROL Operation (0x04)
+    # =========================================================================
+
+    def _send_control(
+        self,
+        block_type: int,
+        control_command: int,
+        wait_response: bool = True,
+    ) -> Optional[bytes]:
+        """Send a CONTROL operation request.
+
+        Per IEC 61158-6-10, CONTROL is used for AR lifecycle state transitions.
+
+        Args:
+            block_type: Block type (e.g., 0x0110 for PrmEnd, 0x0112 for AppReady)
+            control_command: Control command value
+            wait_response: Whether to wait for response
+
+        Returns:
+            Response payload if wait_response=True, else None
+
+        Raises:
+            RPCError: If control fails and wait_response=True
+        """
+        if not self.live:
+            raise RPCError("Not connected")
+
+        # Build control block (same structure as release block)
+        block = PNBlockHeader(block_type, 28, 0x01, 0x00)
+
+        control_block = PNIODReleaseBlock(
+            block_header=bytes(block),
+            padding1=0,
+            ar_uuid=self.ar_uuid,
+            session_key=self.session_key,
+            padding2=0,
+            control_command=control_command,
+            control_block_properties=0,
+            payload=b"",
+        )
+
+        nrd = self._create_nrd(bytes(control_block))
+        rpc = self._create_rpc(PNRPCHeader.CONTROL, bytes(nrd))
+
+        if not wait_response:
+            self._socket.sendto(bytes(rpc), self.peer)
+            logger.debug(f"Sent control 0x{control_command:04X} to {self.info.name}")
+            return None
+
+        response = self._send_recv(rpc)
+        return response
+
+    def prm_begin(self) -> bytes:
+        """Send PrmBegin control command.
+
+        Starts the parameter phase for AR configuration.
+        Should be called after CONNECT before writing parameters.
+
+        Returns:
+            Response payload
+
+        Raises:
+            RPCError: If control fails
+        """
+        from .indices import BLOCK_PRM_BEGIN_REQ, CONTROL_CMD_PRM_BEGIN
+
+        return self._send_control(BLOCK_PRM_BEGIN_REQ, CONTROL_CMD_PRM_BEGIN)
+
+    def prm_end(self) -> bytes:
+        """Send PrmEnd control command.
+
+        Ends the parameter phase after configuration is complete.
+        Should be called after all parameters are written.
+
+        Returns:
+            Response payload
+
+        Raises:
+            RPCError: If control fails
+        """
+        from .indices import BLOCK_IOD_CONTROL_PRM_END_REQ, CONTROL_CMD_PRM_END
+
+        return self._send_control(BLOCK_IOD_CONTROL_PRM_END_REQ, CONTROL_CMD_PRM_END)
+
+    def application_ready(self) -> bytes:
+        """Send ApplicationReady control command.
+
+        Signals that the application is ready for cyclic data exchange.
+        Should be called after PrmEnd.
+
+        Returns:
+            Response payload
+
+        Raises:
+            RPCError: If control fails
+        """
+        from .indices import BLOCK_IOD_CONTROL_APP_READY_REQ, CONTROL_CMD_APPLICATION_READY
+
+        return self._send_control(
+            BLOCK_IOD_CONTROL_APP_READY_REQ, CONTROL_CMD_APPLICATION_READY
+        )
+
+    def ready_for_rt_class_3(self) -> bytes:
+        """Send ReadyForRT_CLASS_3 control command.
+
+        Signals readiness for isochronous real-time data exchange.
+        Only relevant for RT_CLASS_3 (IRT) ARs.
+
+        Returns:
+            Response payload
+
+        Raises:
+            RPCError: If control fails
+        """
+        from .indices import BLOCK_IOD_CONTROL_RT_CLASS_3_REQ, CONTROL_CMD_READY_FOR_RT_CLASS_3
+
+        return self._send_control(
+            BLOCK_IOD_CONTROL_RT_CLASS_3_REQ, CONTROL_CMD_READY_FOR_RT_CLASS_3
+        )
 
     def disconnect(self) -> None:
         """Send Release request to properly terminate the AR.

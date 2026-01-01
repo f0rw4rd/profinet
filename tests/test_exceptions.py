@@ -158,53 +158,81 @@ class TestPNIOError:
         assert error.error_code2 == 0x07
 
     def test_from_args_status_invalid_slot(self):
-        """Test creating PNIOError from ArgsStatus for invalid slot."""
-        # ArgsStatus: 0x07B280DE (invalid slot)
+        """Test creating PNIOError from ArgsStatus for invalid slot.
+
+        ArgsStatus is byte-swapped from big-endian parse to Hilscher format.
+        Wire bytes [0x07, 0xB2, 0x80, 0xDE] → big-endian 0x07B280DE → swap → 0xDE80B207
+        """
+        # After byte-swap: ErrorCode=0xDE, ErrorDecode=0x80, ErrorCode1=0xB2, ErrorCode2=0x07
         args_status = 0x07B280DE
         error = PNIOError.from_args_status(args_status)
 
+        assert error.error_code == 0xDE
+        assert error.error_decode == 0x80
         assert error.error_code1 == 0xB2
         assert error.error_code2 == 0x07
         assert "Invalid slot" in str(error)
 
     def test_from_args_status_invalid_subslot(self):
         """Test creating PNIOError from ArgsStatus for invalid subslot."""
-        # ArgsStatus: 0x08B280DE (invalid subslot)
+        # After byte-swap: ErrorCode=0xDE, ErrorDecode=0x80, ErrorCode1=0xB2, ErrorCode2=0x08
         args_status = 0x08B280DE
         error = PNIOError.from_args_status(args_status)
 
+        assert error.error_code == 0xDE
+        assert error.error_decode == 0x80
         assert error.error_code1 == 0xB2
         assert error.error_code2 == 0x08
         assert "Invalid subslot" in str(error)
 
     def test_from_args_status_invalid_index(self):
         """Test creating PNIOError from ArgsStatus for invalid index."""
-        # ArgsStatus: 0x00B080DE (invalid index)
+        # After byte-swap: ErrorCode=0xDE, ErrorDecode=0x80, ErrorCode1=0xB0, ErrorCode2=0x00
         args_status = 0x00B080DE
         error = PNIOError.from_args_status(args_status)
 
+        assert error.error_code == 0xDE
+        assert error.error_decode == 0x80
         assert error.error_code1 == 0xB0
         assert error.error_code2 == 0x00
-        assert "Invalid index" in str(error)
+        assert "Index not supported" in str(error)
 
     def test_from_args_status_invalid_api(self):
         """Test creating PNIOError from ArgsStatus for invalid API."""
-        # ArgsStatus: 0x06B480DE (invalid API)
+        # After byte-swap: ErrorCode=0xDE, ErrorDecode=0x80, ErrorCode1=0xB4, ErrorCode2=0x06
         args_status = 0x06B480DE
         error = PNIOError.from_args_status(args_status)
 
+        assert error.error_code == 0xDE
+        assert error.error_decode == 0x80
         assert error.error_code1 == 0xB4
         assert error.error_code2 == 0x06
         assert "Invalid API" in str(error)
 
-    def test_from_args_status_unknown_error(self):
-        """Test creating PNIOError from unknown ArgsStatus."""
-        # ArgsStatus: 0xFF000000 (unknown)
-        args_status = 0xFF000000
+    def test_from_args_status_rmpm_error(self):
+        """Test creating PNIOError for RMPM connect error (unknown blocks).
+
+        This matches Hilscher constant PNIO_E_RMPM_CONNECT_UNKNOWN_BLOCKS = 0xDB814001
+        Wire bytes [0x01, 0x40, 0x81, 0xDB] → big-endian 0x014081DB → swap → 0xDB814001
+        """
+        args_status = 0x014081DB
         error = PNIOError.from_args_status(args_status)
 
+        assert error.error_code == 0xDB  # IODConnectRes
+        assert error.error_decode == 0x81  # PNIO
+        assert error.error_code1 == 0x40  # RMPM
+        assert error.error_code2 == 0x01  # Unknown blocks
+        assert "Unknown blocks" in str(error)
+
+    def test_from_args_status_unknown_error(self):
+        """Test creating PNIOError from unknown ArgsStatus."""
+        # After byte-swap: ErrorCode=0xDE, ErrorDecode=0x80, ErrorCode1=0xB2, ErrorCode2=0xFF
+        args_status = 0xFFB280DE
+        error = PNIOError.from_args_status(args_status)
+
+        assert error.error_code == 0xDE
         assert error.error_code2 == 0xFF
-        assert "PNIO error" in str(error)
+        assert "Unknown" in str(error)
 
     def test_str_format(self):
         """Test string representation format."""

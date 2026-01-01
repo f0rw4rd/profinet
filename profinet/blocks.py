@@ -691,3 +691,422 @@ def parse_port_statistics(data: bytes, offset: int = 0) -> Dict[str, int]:
     }
 
     return result
+
+
+# =============================================================================
+# ModuleDiffBlock (0x8104) - Response showing module/submodule differences
+# =============================================================================
+
+@dataclass
+class ModuleDiffSubmodule:
+    """Difference info for a single submodule."""
+    subslot_number: int = 0
+    submodule_ident_number: int = 0
+    submodule_state: int = 0
+
+    @property
+    def state_name(self) -> str:
+        """Human-readable state name."""
+        return indices.SUBMODULE_STATE_NAMES.get(
+            self.submodule_state,
+            f"Unknown(0x{self.submodule_state:04X})"
+        )
+
+    @property
+    def is_ok(self) -> bool:
+        """True if submodule state is OK (0x0007)."""
+        return self.submodule_state == indices.SUBMODULE_STATE_OK
+
+
+@dataclass
+class ModuleDiffModule:
+    """Difference info for a single module (slot)."""
+    api: int = 0
+    slot_number: int = 0
+    module_ident_number: int = 0
+    module_state: int = 0
+    submodules: List[ModuleDiffSubmodule] = field(default_factory=list)
+
+    @property
+    def state_name(self) -> str:
+        """Human-readable state name."""
+        return indices.MODULE_STATE_NAMES.get(
+            self.module_state,
+            f"Unknown(0x{self.module_state:04X})"
+        )
+
+    @property
+    def is_proper(self) -> bool:
+        """True if module state is Proper (0x0002)."""
+        return self.module_state == indices.MODULE_STATE_PROPER_MODULE
+
+
+@dataclass
+class ModuleDiffBlock:
+    """Parsed ModuleDiffBlock (0x8104)."""
+    modules: List[ModuleDiffModule] = field(default_factory=list)
+
+    @property
+    def all_ok(self) -> bool:
+        """Check if all modules and submodules match expected configuration."""
+        for mod in self.modules:
+            if not mod.is_proper:
+                return False
+            for sub in mod.submodules:
+                if not sub.is_ok:
+                    return False
+        return True
+
+    def get_mismatches(self) -> List[Tuple[int, int, str]]:
+        """Get list of mismatched slots/subslots.
+
+        Returns:
+            List of (slot, subslot, state_name) tuples for non-OK items
+        """
+        mismatches = []
+        for mod in self.modules:
+            if not mod.is_proper:
+                mismatches.append((mod.slot_number, 0, mod.state_name))
+            for sub in mod.submodules:
+                if not sub.is_ok:
+                    mismatches.append((mod.slot_number, sub.subslot_number, sub.state_name))
+        return mismatches
+
+
+def parse_module_diff_block(data: bytes) -> ModuleDiffBlock:
+    """Parse ModuleDiffBlock (0x8104) from bytes.
+
+    Args:
+        data: Raw bytes of ModuleDiffBlock
+
+    Returns:
+        Parsed ModuleDiffBlock
+
+    Raises:
+        ValueError: If block type is wrong or data is truncated
+    """
+    if len(data) < 6:
+        return ModuleDiffBlock(modules=[])
+
+    offset = 0
+
+    # Parse block header
+    block_type, block_len, ver_hi, ver_lo = struct.unpack_from(">HHBB", data, offset)
+    offset += 6
+
+    if block_type != indices.BLOCK_MODULE_DIFF_BLOCK:
+        raise ValueError(f"Expected block type 0x8104, got 0x{block_type:04X}")
+
+    # NumberOfAPIs
+    if len(data) < offset + 2:
+        return ModuleDiffBlock(modules=[])
+
+    num_apis = struct.unpack_from(">H", data, offset)[0]
+    offset += 2
+
+    modules = []
+
+    for _ in range(num_apis):
+        if len(data) < offset + 6:
+            break
+
+        api = struct.unpack_from(">I", data, offset)[0]
+        offset += 4
+
+        num_modules = struct.unpack_from(">H", data, offset)[0]
+        offset += 2
+
+        for _ in range(num_modules):
+            if len(data) < offset + 10:
+                break
+
+            slot_nr, module_ident, module_state, num_submodules = struct.unpack_from(
+                ">HIHH", data, offset
+            )
+            offset += 10
+
+            submodules = []
+            for _ in range(num_submodules):
+                if len(data) < offset + 8:
+                    break
+
+                subslot_nr, submodule_ident, submodule_state = struct.unpack_from(
+                    ">HIH", data, offset
+                )
+                offset += 8
+
+                submodules.append(ModuleDiffSubmodule(
+                    subslot_number=subslot_nr,
+                    submodule_ident_number=submodule_ident,
+                    submodule_state=submodule_state,
+                ))
+
+            modules.append(ModuleDiffModule(
+                api=api,
+                slot_number=slot_nr,
+                module_ident_number=module_ident,
+                module_state=module_state,
+                submodules=submodules,
+            ))
+
+    return ModuleDiffBlock(modules=modules)
+
+
+# =============================================================================
+# IODWriteMultiple Builder (Index 0xE040)
+# =============================================================================
+
+@dataclass
+class WriteMultipleResult:
+    """Result of a single write in WriteMultiple operation."""
+    seq_num: int = 0
+    api: int = 0
+    slot: int = 0
+    subslot: int = 0
+    index: int = 0
+    status: int = 0
+    additional_value1: int = 0
+    additional_value2: int = 0
+
+    @property
+    def success(self) -> bool:
+        """True if write succeeded (status == 0)."""
+        return self.status == 0
+
+
+class IODWriteMultipleBuilder:
+    """Builder for IODWriteMultipleReq packets (index 0xE040).
+
+    Handles proper padding between write blocks per IEC 61158-6-10.
+    """
+
+    INDEX = 0xE040
+    BLOCK_TYPE = 0x0008
+
+    def __init__(self, ar_uuid: bytes, seq_num: int = 0):
+        """Initialize builder.
+
+        Args:
+            ar_uuid: AR UUID (16 bytes)
+            seq_num: Starting sequence number
+        """
+        self.ar_uuid = ar_uuid
+        self.seq_num = seq_num
+        self.writes: List[Tuple[int, int, int, int, bytes]] = []
+
+    def add_write(
+        self,
+        slot: int,
+        subslot: int,
+        index: int,
+        data: bytes,
+        api: int = 0,
+    ) -> "IODWriteMultipleBuilder":
+        """Add a write operation."""
+        self.writes.append((api, slot, subslot, index, data))
+        return self
+
+    def build(self) -> bytes:
+        """Build the complete IODWriteMultipleReq packet."""
+        blocks_data = bytearray()
+
+        for i, (api, slot, subslot, index, data) in enumerate(self.writes):
+            block = self._build_write_block(i, api, slot, subslot, index, data)
+            blocks_data.extend(block)
+
+            # 4-byte padding (except last block)
+            if i < len(self.writes) - 1:
+                pad_len = (4 - (len(block) % 4)) % 4
+                blocks_data.extend(b'\x00' * pad_len)
+
+        header = self._build_header(len(blocks_data))
+        return bytes(header) + bytes(blocks_data)
+
+    def _build_write_block(
+        self, seq: int, api: int, slot: int, subslot: int, index: int, data: bytes
+    ) -> bytes:
+        """Build a single IODWriteReq block."""
+        block_header = struct.pack(">HHBB", 0x0008, 60, 0x01, 0x00)
+        body = struct.pack(
+            ">H16sIHHHHI24s",
+            seq, self.ar_uuid, api, slot, subslot, 0, index, len(data), bytes(24)
+        )
+        return block_header + body + data
+
+    def _build_header(self, blocks_len: int) -> bytes:
+        """Build the outer IODWriteMultipleReq header."""
+        block_header = struct.pack(">HHBB", 0x0008, 60, 0x01, 0x00)
+        body = struct.pack(
+            ">H16sIHHHHI24s",
+            self.seq_num, self.ar_uuid, 0xFFFFFFFF, 0xFFFF, 0xFFFF, 0, self.INDEX, blocks_len, bytes(24)
+        )
+        return block_header + body
+
+
+def parse_write_multiple_response(data: bytes) -> List[WriteMultipleResult]:
+    """Parse IODWriteMultipleRes into individual results."""
+    results = []
+    if len(data) < 64:
+        return results
+
+    record_len = struct.unpack_from(">I", data, 36)[0]
+    offset = 64
+    end = min(offset + record_len, len(data))
+
+    while offset + 56 <= end:
+        block_type, block_len = struct.unpack_from(">HH", data, offset)
+        if block_type != 0x8008:
+            break
+
+        seq_num = struct.unpack_from(">H", data, offset + 6)[0]
+        api = struct.unpack_from(">I", data, offset + 24)[0]
+        slot = struct.unpack_from(">H", data, offset + 28)[0]
+        subslot = struct.unpack_from(">H", data, offset + 30)[0]
+        index = struct.unpack_from(">H", data, offset + 34)[0]
+        add_val1 = struct.unpack_from(">H", data, offset + 40)[0]
+        add_val2 = struct.unpack_from(">H", data, offset + 42)[0]
+        status = struct.unpack_from(">I", data, offset + 44)[0]
+
+        results.append(WriteMultipleResult(
+            seq_num=seq_num, api=api, slot=slot, subslot=subslot,
+            index=index, status=status, additional_value1=add_val1, additional_value2=add_val2
+        ))
+
+        block_size = 4 + block_len
+        pad = (4 - (block_size % 4)) % 4
+        offset += block_size + pad
+
+    return results
+
+
+# =============================================================================
+# ExpectedSubmodule Structures (0x0104)
+# =============================================================================
+
+@dataclass
+class ExpectedSubmoduleDataDescription:
+    """Describes I/O data for a submodule."""
+    data_description: int = 1  # 1=Input, 2=Output
+    submodule_data_length: int = 0
+    length_iocs: int = 1
+    length_iops: int = 1
+
+    def to_bytes(self) -> bytes:
+        """Serialize to bytes."""
+        return struct.pack(
+            ">HHBB",
+            self.data_description,
+            self.submodule_data_length,
+            self.length_iocs,
+            self.length_iops,
+        )
+
+
+@dataclass
+class ExpectedSubmodule:
+    """Expected submodule within a slot."""
+    subslot_number: int = 0
+    submodule_ident_number: int = 0
+    submodule_properties: int = 0
+    data_descriptions: List[ExpectedSubmoduleDataDescription] = field(default_factory=list)
+
+    @property
+    def submodule_type(self) -> int:
+        """Get SubmoduleProperties_Type (0=NO_IO, 1=INPUT, 2=OUTPUT, 3=INPUT_OUTPUT)."""
+        return self.submodule_properties & 0x03
+
+    def to_bytes(self) -> bytes:
+        """Serialize to bytes."""
+        result = struct.pack(
+            ">HIH",
+            self.subslot_number,
+            self.submodule_ident_number,
+            self.submodule_properties,
+        )
+        for dd in self.data_descriptions:
+            result += dd.to_bytes()
+        return result
+
+
+@dataclass
+class ExpectedSubmoduleAPI:
+    """Expected submodules for a specific API/slot."""
+    api: int = 0
+    slot_number: int = 0
+    module_ident_number: int = 0
+    module_properties: int = 0
+    submodules: List[ExpectedSubmodule] = field(default_factory=list)
+
+    def to_bytes(self) -> bytes:
+        """Serialize to bytes."""
+        result = struct.pack(
+            ">IHIHH",
+            self.api,
+            self.slot_number,
+            self.module_ident_number,
+            self.module_properties,
+            len(self.submodules),
+        )
+        for sm in self.submodules:
+            result += sm.to_bytes()
+        return result
+
+
+class ExpectedSubmoduleBlockReq:
+    """ExpectedSubmoduleBlockReq (0x0104) builder."""
+
+    BLOCK_TYPE = 0x0104
+
+    def __init__(self):
+        """Initialize empty builder."""
+        self.apis: List[ExpectedSubmoduleAPI] = []
+
+    def add_submodule(
+        self,
+        api: int,
+        slot: int,
+        subslot: int,
+        module_ident: int,
+        submodule_ident: int,
+        submodule_type: int = 0,
+        input_length: int = 0,
+        output_length: int = 0,
+    ) -> "ExpectedSubmoduleBlockReq":
+        """Add a single submodule."""
+        # Find or create API entry
+        api_entry = None
+        for a in self.apis:
+            if a.api == api and a.slot_number == slot:
+                api_entry = a
+                break
+
+        if api_entry is None:
+            api_entry = ExpectedSubmoduleAPI(
+                api=api, slot_number=slot, module_ident_number=module_ident,
+                module_properties=0, submodules=[]
+            )
+            self.apis.append(api_entry)
+
+        # Build data descriptions
+        dds = []
+        if submodule_type in (1, 3):  # INPUT or INPUT_OUTPUT
+            dds.append(ExpectedSubmoduleDataDescription(1, input_length, 1, 1))
+        if submodule_type in (2, 3):  # OUTPUT or INPUT_OUTPUT
+            dds.append(ExpectedSubmoduleDataDescription(2, output_length, 1, 1))
+        if submodule_type == 0:  # NO_IO
+            dds.append(ExpectedSubmoduleDataDescription(1, 0, 1, 1))
+
+        api_entry.submodules.append(ExpectedSubmodule(
+            subslot, submodule_ident, submodule_type, dds
+        ))
+        return self
+
+    def to_bytes(self) -> bytes:
+        """Build complete ExpectedSubmoduleBlockReq."""
+        body = struct.pack(">H", len(self.apis))
+        for api in self.apis:
+            body += api.to_bytes()
+
+        block_len = len(body) + 2
+        header = struct.pack(">HHBB", self.BLOCK_TYPE, block_len, 0x01, 0x00)
+        return header + body

@@ -1,0 +1,447 @@
+"""
+PROFINET Real-Time Frame Handling.
+
+Provides data structures for RT_CLASS_1 cyclic data exchange:
+- RTFrame: Cyclic frame serialization/deserialization
+- IOCRConfig: IOCR configuration from AR setup
+- IODataObject: Individual IO data object within C_SDU
+- CyclicDataBuilder: Build C_SDU payload from IO objects
+
+Per IEC 61158-6-10:
+- RT frames use EtherType 0x8892
+- Frame IDs 0xC000-0xFBFF for RT_CLASS_1
+- C_SDU contains process data + IOxS status bytes
+"""
+
+from __future__ import annotations
+
+import struct
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+# EtherType for PROFINET RT frames
+ETHERTYPE_PROFINET = 0x8892
+
+# Frame ID ranges
+FRAME_ID_RT_CLASS_1_MIN = 0xC000
+FRAME_ID_RT_CLASS_1_MAX = 0xFBFF
+FRAME_ID_ALARM_HIGH = 0xFC01
+FRAME_ID_ALARM_LOW = 0xFE01
+
+# IOCR types
+IOCR_TYPE_INPUT = 1   # Device -> Controller
+IOCR_TYPE_OUTPUT = 2  # Controller -> Device
+
+# RT Class values
+RT_CLASS_1 = 0x01  # Software scheduled (250µs - 512ms)
+RT_CLASS_2 = 0x02  # Hardware scheduled (reserved)
+RT_CLASS_3 = 0x03  # IRT (isochronous, hardware only)
+
+# DataStatus bit definitions
+DATA_STATUS_STATE = 0x01      # 0=Backup, 1=Primary
+DATA_STATUS_REDUNDANCY = 0x02  # Redundancy state
+DATA_STATUS_VALID = 0x04      # 0=Invalid, 1=Valid
+DATA_STATUS_RESERVED = 0x08
+DATA_STATUS_PROVIDER_RUN = 0x10  # 0=Stop, 1=Run
+DATA_STATUS_STATION_OK = 0x20    # 0=Problem, 1=OK
+DATA_STATUS_IGNORE = 0x80        # 1=Ignore frame
+
+# IOxS (Provider/Consumer Status) values
+IOXS_GOOD = 0x80              # Good data, subslot level
+IOXS_BAD = 0x00               # Bad data
+IOXS_EXTENSION = 0x01         # More IOxS follows
+
+
+@dataclass
+class IODataObject:
+    """Single IO data object within C_SDU.
+
+    Represents one piece of process data mapped to a slot/subslot.
+    """
+
+    slot: int
+    """Slot number."""
+
+    subslot: int
+    """Subslot number."""
+
+    frame_offset: int
+    """Offset within C_SDU payload for data."""
+
+    data_length: int
+    """Length of process data in bytes."""
+
+    iops_offset: int
+    """Offset for IOPS (Provider Status) byte."""
+
+    iocs_offset: int = 0
+    """Offset for IOCS (Consumer Status) byte, if applicable."""
+
+
+@dataclass
+class IOCRConfig:
+    """IOCR configuration from AR setup.
+
+    Contains timing parameters and IO object mappings
+    needed for cyclic data exchange.
+    """
+
+    iocr_type: int
+    """IOCR type: 1=Input (device->controller), 2=Output (controller->device)."""
+
+    iocr_reference: int
+    """Local IOCR reference number."""
+
+    frame_id: int
+    """Assigned Frame ID (0xC000-0xFBFF for RT_CLASS_1)."""
+
+    send_clock_factor: int = 32
+    """Base clock multiplier (32 = 1ms base)."""
+
+    reduction_ratio: int = 32
+    """Update rate reduction (1 = every cycle)."""
+
+    phase: int = 0
+    """Phase offset within cycle."""
+
+    watchdog_factor: int = 3
+    """Watchdog multiplier (timeout = watchdog_factor * cycle_time)."""
+
+    data_length: int = 40
+    """Total C_SDU length (minimum 40 bytes)."""
+
+    objects: List[IODataObject] = field(default_factory=list)
+    """List of IO data objects within this IOCR."""
+
+    @property
+    def cycle_time_us(self) -> int:
+        """Calculate cycle time in microseconds.
+
+        Base clock is 31.25µs per IEC 61158.
+        cycle_time = reduction_ratio * send_clock_factor * 31.25µs
+        """
+        # Using integer math: 31.25 = 125/4
+        return (self.reduction_ratio * self.send_clock_factor * 125) // 4
+
+    @property
+    def cycle_time_ms(self) -> float:
+        """Calculate cycle time in milliseconds."""
+        return self.cycle_time_us / 1000.0
+
+    @property
+    def watchdog_time_us(self) -> int:
+        """Calculate watchdog timeout in microseconds."""
+        return self.watchdog_factor * self.cycle_time_us
+
+    @property
+    def is_input(self) -> bool:
+        """True if this is an Input IOCR (device->controller)."""
+        return self.iocr_type == IOCR_TYPE_INPUT
+
+    @property
+    def is_output(self) -> bool:
+        """True if this is an Output IOCR (controller->device)."""
+        return self.iocr_type == IOCR_TYPE_OUTPUT
+
+
+@dataclass
+class RTFrame:
+    """PROFINET Real-Time cyclic frame.
+
+    Represents a single RT frame including:
+    - Frame ID (identifies the IOCR)
+    - C_SDU payload (process data + IOxS)
+    - Cycle counter and status
+
+    Example:
+        >>> # Parse incoming frame
+        >>> frame = RTFrame.from_bytes(data[14:])  # Skip Ethernet header
+        >>> if frame.is_valid and frame.is_running:
+        ...     process_data = frame.payload[:4]
+
+        >>> # Build outgoing frame
+        >>> frame = RTFrame(
+        ...     frame_id=0xC000,
+        ...     cycle_counter=1,
+        ...     data_status=RTFrame.DATA_VALID | RTFrame.DATA_RUN,
+        ...     transfer_status=0,
+        ...     payload=payload,
+        ... )
+        >>> eth_frame = dst_mac + src_mac + ETHERTYPE + frame.to_bytes()
+    """
+
+    frame_id: int
+    """Frame ID identifying the IOCR (0xC000-0xFBFF for RT_CLASS_1)."""
+
+    cycle_counter: int
+    """16-bit cycle counter, increments each cycle."""
+
+    data_status: int
+    """DataStatus byte with validity and state flags."""
+
+    transfer_status: int
+    """TransferStatus byte (usually 0)."""
+
+    payload: bytes
+    """C_SDU payload containing process data and IOxS."""
+
+    # DataStatus convenience constants
+    DATA_VALID = DATA_STATUS_VALID
+    DATA_PRIMARY = DATA_STATUS_STATE
+    DATA_RUN = DATA_STATUS_PROVIDER_RUN
+    DATA_OK = DATA_STATUS_STATION_OK
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "RTFrame":
+        """Parse RT frame from raw bytes (after Ethernet header).
+
+        Args:
+            data: Raw bytes starting with Frame ID
+
+        Returns:
+            Parsed RTFrame
+
+        Raises:
+            ValueError: If data is too short
+        """
+        if len(data) < 6:
+            raise ValueError(f"RT frame too short: {len(data)} bytes")
+
+        frame_id = struct.unpack(">H", data[0:2])[0]
+
+        # Payload is variable, ends with 4 bytes: cycle(2) + status(2)
+        payload = data[2:-4]
+        cycle_counter = struct.unpack(">H", data[-4:-2])[0]
+        data_status = data[-2]
+        transfer_status = data[-1]
+
+        return cls(
+            frame_id=frame_id,
+            cycle_counter=cycle_counter,
+            data_status=data_status,
+            transfer_status=transfer_status,
+            payload=payload,
+        )
+
+    def to_bytes(self) -> bytes:
+        """Serialize RT frame to bytes.
+
+        Returns:
+            Serialized frame (Frame ID + payload + cycle + status)
+        """
+        return (
+            struct.pack(">H", self.frame_id)
+            + self.payload
+            + struct.pack(">H", self.cycle_counter)
+            + bytes([self.data_status, self.transfer_status])
+        )
+
+    @property
+    def is_valid(self) -> bool:
+        """True if data is valid (DataStatus bit 2)."""
+        return bool(self.data_status & DATA_STATUS_VALID)
+
+    @property
+    def is_running(self) -> bool:
+        """True if provider is running (DataStatus bit 4)."""
+        return bool(self.data_status & DATA_STATUS_PROVIDER_RUN)
+
+    @property
+    def is_ok(self) -> bool:
+        """True if station is OK (DataStatus bit 5)."""
+        return bool(self.data_status & DATA_STATUS_STATION_OK)
+
+    @property
+    def is_primary(self) -> bool:
+        """True if this is primary data (DataStatus bit 0)."""
+        return bool(self.data_status & DATA_STATUS_STATE)
+
+    def __repr__(self) -> str:
+        flags = []
+        if self.is_valid:
+            flags.append("VALID")
+        if self.is_running:
+            flags.append("RUN")
+        if self.is_ok:
+            flags.append("OK")
+        if self.is_primary:
+            flags.append("PRIMARY")
+        flags_str = "|".join(flags) if flags else "NONE"
+        return (
+            f"RTFrame(id=0x{self.frame_id:04X}, "
+            f"cycle={self.cycle_counter}, "
+            f"status={flags_str}, "
+            f"payload={len(self.payload)}B)"
+        )
+
+
+class CyclicDataBuilder:
+    """Builds C_SDU payload from IO data objects.
+
+    Helper class to construct properly formatted cyclic
+    data payloads with process data and IOxS bytes.
+
+    Example:
+        >>> config = IOCRConfig(
+        ...     iocr_type=2, frame_id=0xC000, data_length=48,
+        ...     objects=[
+        ...         IODataObject(slot=1, subslot=1, frame_offset=0,
+        ...                      data_length=8, iops_offset=8),
+        ...     ]
+        ... )
+        >>> builder = CyclicDataBuilder(config)
+        >>> builder.set_data(1, 1, b"\\x11\\x22\\x33\\x44\\x55\\x66\\x77\\x88")
+        >>> builder.set_iops(1, 1, IOXS_GOOD)
+        >>> payload = builder.build()
+    """
+
+    def __init__(self, config: IOCRConfig):
+        """Initialize builder with IOCR configuration.
+
+        Args:
+            config: IOCRConfig with data length and object mappings
+        """
+        self.config = config
+        self._buffer = bytearray(config.data_length)
+
+    def set_data(self, slot: int, subslot: int, data: bytes) -> None:
+        """Set process data for a slot/subslot.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+            data: Process data bytes
+
+        Raises:
+            ValueError: If slot/subslot not found in config
+        """
+        for obj in self.config.objects:
+            if obj.slot == slot and obj.subslot == subslot:
+                end = obj.frame_offset + min(len(data), obj.data_length)
+                self._buffer[obj.frame_offset:end] = data[: obj.data_length]
+                return
+        raise ValueError(f"Unknown slot/subslot: {slot}/{subslot}")
+
+    def get_data(self, slot: int, subslot: int) -> bytes:
+        """Get process data for a slot/subslot.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+
+        Returns:
+            Process data bytes
+
+        Raises:
+            ValueError: If slot/subslot not found in config
+        """
+        for obj in self.config.objects:
+            if obj.slot == slot and obj.subslot == subslot:
+                return bytes(
+                    self._buffer[obj.frame_offset : obj.frame_offset + obj.data_length]
+                )
+        raise ValueError(f"Unknown slot/subslot: {slot}/{subslot}")
+
+    def set_iops(self, slot: int, subslot: int, status: int = IOXS_GOOD) -> None:
+        """Set Provider Status (IOPS) for a slot/subslot.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+            status: IOPS value (default: IOXS_GOOD = 0x80)
+        """
+        for obj in self.config.objects:
+            if obj.slot == slot and obj.subslot == subslot:
+                self._buffer[obj.iops_offset] = status
+                return
+
+    def set_iocs(self, slot: int, subslot: int, status: int = IOXS_GOOD) -> None:
+        """Set Consumer Status (IOCS) for a slot/subslot.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+            status: IOCS value (default: IOXS_GOOD = 0x80)
+        """
+        for obj in self.config.objects:
+            if obj.slot == slot and obj.subslot == subslot:
+                if obj.iocs_offset > 0:
+                    self._buffer[obj.iocs_offset] = status
+                return
+
+    def set_all_iops(self, status: int = IOXS_GOOD) -> None:
+        """Set IOPS for all objects.
+
+        Args:
+            status: IOPS value for all objects
+        """
+        for obj in self.config.objects:
+            self._buffer[obj.iops_offset] = status
+
+    def clear(self) -> None:
+        """Clear all data to zeros."""
+        for i in range(len(self._buffer)):
+            self._buffer[i] = 0
+
+    def build(self) -> bytes:
+        """Build and return C_SDU payload.
+
+        Returns:
+            Complete payload bytes
+        """
+        return bytes(self._buffer)
+
+    def load(self, payload: bytes) -> None:
+        """Load payload data into buffer.
+
+        Args:
+            payload: Received payload bytes
+        """
+        copy_len = min(len(payload), len(self._buffer))
+        self._buffer[:copy_len] = payload[:copy_len]
+
+
+def build_ethernet_frame(
+    dst_mac: bytes,
+    src_mac: bytes,
+    rt_frame: RTFrame,
+) -> bytes:
+    """Build complete Ethernet frame with RT payload.
+
+    Args:
+        dst_mac: Destination MAC address (6 bytes)
+        src_mac: Source MAC address (6 bytes)
+        rt_frame: RT frame to embed
+
+    Returns:
+        Complete Ethernet frame bytes
+    """
+    return (
+        dst_mac
+        + src_mac
+        + struct.pack(">H", ETHERTYPE_PROFINET)
+        + rt_frame.to_bytes()
+    )
+
+
+def parse_ethernet_frame(data: bytes) -> Optional[RTFrame]:
+    """Parse Ethernet frame and extract RT frame.
+
+    Args:
+        data: Complete Ethernet frame
+
+    Returns:
+        RTFrame if valid PROFINET frame, None otherwise
+    """
+    if len(data) < 18:  # 14 (eth) + 4 (min RT)
+        return None
+
+    ethertype = struct.unpack(">H", data[12:14])[0]
+    if ethertype != ETHERTYPE_PROFINET:
+        return None
+
+    try:
+        return RTFrame.from_bytes(data[14:])
+    except ValueError:
+        return None

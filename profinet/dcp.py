@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import logging
 import random
+import struct
 import time
+from dataclasses import dataclass, field
 from socket import socket, timeout as SocketTimeout
 from struct import unpack
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .exceptions import DCPError, DCPDeviceNotFoundError, DCPTimeoutError
 from .protocol import (
@@ -34,6 +36,7 @@ from .util import (
     PROFINET_ETHERTYPE,
     VLAN_ETHERTYPE,
     ETH_P_ALL,
+    ip2s,
     mac2s,
     max_timeout,
     s2ip,
@@ -53,6 +56,18 @@ DCP_MULTICAST_MAC = "01:0e:cf:00:00:00"
 # DCP Frame IDs
 DCP_IDENTIFY_FRAME_ID = 0xFEFE
 DCP_GET_SET_FRAME_ID = 0xFEFD
+DCP_HELLO_FRAME_ID = 0xFEFC
+
+# DCP Service IDs
+DCP_SERVICE_ID_GET = 0x03
+DCP_SERVICE_ID_SET = 0x04
+DCP_SERVICE_ID_IDENTIFY = 0x05
+DCP_SERVICE_ID_HELLO = 0x06
+
+# DCP Service Types
+DCP_SERVICE_TYPE_REQUEST = 0x00
+DCP_SERVICE_TYPE_RESPONSE_SUCCESS = 0x01
+DCP_SERVICE_TYPE_RESPONSE_UNSUPPORTED = 0x05
 
 # DCP maximum name length (IEC 61158-6-10)
 DCP_MAX_NAME_LENGTH = 240
@@ -90,6 +105,41 @@ DCP_SUBOPTION_CONTROL_SIGNAL = 0x03
 DCP_SUBOPTION_CONTROL_RESPONSE = 0x04
 DCP_SUBOPTION_CONTROL_RESET_FACTORY = 0x05
 DCP_SUBOPTION_CONTROL_RESET_TO_FACTORY = 0x06
+
+# DCP SubOptions for DHCP (Option 3) - Standard DHCP option codes
+DCP_SUBOPTION_DHCP_HOSTNAME = 0x0C       # 12 - Host name
+DCP_SUBOPTION_DHCP_VENDOR_SPEC = 0x2B    # 43 - Vendor specific
+DCP_SUBOPTION_DHCP_SERVER_ID = 0x36      # 54 - Server identifier
+DCP_SUBOPTION_DHCP_PARAM_REQ = 0x37      # 55 - Parameter request list
+DCP_SUBOPTION_DHCP_CLASS_ID = 0x3C       # 60 - Class identifier
+DCP_SUBOPTION_DHCP_CLIENT_ID = 0x3D      # 61 - DHCP client identifier
+DCP_SUBOPTION_DHCP_FQDN = 0x51           # 81 - FQDN
+DCP_SUBOPTION_DHCP_UUID = 0x61           # 97 - UUID/GUID-based Client
+DCP_SUBOPTION_DHCP_CONTROL = 0xFF        # 255 - Control DHCP
+
+# DCP SubOptions for LLDP (Option 4)
+DCP_SUBOPTION_LLDP_PORT_ID = 0x01
+DCP_SUBOPTION_LLDP_CHASSIS_ID = 0x02
+DCP_SUBOPTION_LLDP_TTL = 0x03
+DCP_SUBOPTION_LLDP_PORT_DESC = 0x04
+DCP_SUBOPTION_LLDP_SYSTEM_NAME = 0x05
+DCP_SUBOPTION_LLDP_SYSTEM_DESC = 0x06
+DCP_SUBOPTION_LLDP_SYSTEM_CAP = 0x07
+DCP_SUBOPTION_LLDP_MGMT_ADDR = 0x08
+
+# DCP SubOptions for DeviceInitiative (Option 6)
+DCP_SUBOPTION_DEVICE_INITIATIVE = 0x01
+
+# Manufacturer-specific options (0x80-0xFE per IEC 61158-6-10)
+DCP_OPTION_MANUF_MIN = 0x80
+DCP_OPTION_MANUF_MAX = 0xFE
+DCP_OPTION_MANUF_X80 = 0x80
+DCP_OPTION_MANUF_X81 = 0x81
+DCP_OPTION_MANUF_X82 = 0x82
+DCP_OPTION_MANUF_X83 = 0x83
+DCP_OPTION_MANUF_X84 = 0x84
+DCP_OPTION_MANUF_X85 = 0x85
+DCP_OPTION_MANUF_X86 = 0x86
 
 # Device Role bit masks
 DEVICE_ROLE_IO_DEVICE = 0x01
@@ -197,13 +247,139 @@ def get_block_name(option: int, suboption: int) -> str:
 
     return f"{opt_name}/{subopt_name}"
 
-# Reset modes for Reset to Factory
-RESET_MODE_COMMUNICATION = 0x0002  # Mode 2: Reset communication params (mandatory)
-RESET_MODE_APPLICATION = 0x0004   # Mode 1: Reset application data
-RESET_MODE_ENGINEERING = 0x0008   # Mode 3: Reset engineering data
-RESET_MODE_ALL_DATA = 0x0010      # Mode 4: Reset all data
-RESET_MODE_DEVICE = 0x0020        # Mode 8: Reset device
-RESET_MODE_FACTORY = 0x0040       # Mode 9: Reset to factory image
+# Legacy reset mode constants (kept for compatibility)
+RESET_MODE_COMMUNICATION = 0x0002
+RESET_MODE_APPLICATION = 0x0004
+RESET_MODE_ENGINEERING = 0x0008
+RESET_MODE_ALL_DATA = 0x0010
+RESET_MODE_DEVICE = 0x0020
+RESET_MODE_FACTORY = 0x0040
+
+
+class IPBlockInfo:
+    """IP Block Info values (IEC 61158-6-10).
+
+    These values indicate the IP configuration status of a device.
+    """
+
+    IP_NOT_SET = 0x0000
+    IP_SET = 0x0001
+    IP_SET_BY_DHCP = 0x0002
+    IP_NOT_SET_CONFLICT = 0x0080
+    IP_SET_CONFLICT = 0x0081
+    IP_SET_BY_DHCP_CONFLICT = 0x0082
+
+    NAMES = {
+        0x0000: "IP not set",
+        0x0001: "IP set",
+        0x0002: "IP set by DHCP",
+        0x0080: "IP not set (address conflict detected)",
+        0x0081: "IP set (address conflict detected)",
+        0x0082: "IP set by DHCP (address conflict detected)",
+    }
+
+    @classmethod
+    def get_name(cls, info: int) -> str:
+        """Get human-readable name for IP block info."""
+        return cls.NAMES.get(info, f"Unknown (0x{info:04X})")
+
+    @classmethod
+    def has_conflict(cls, info: int) -> bool:
+        """Check if IP block info indicates address conflict."""
+        return (info & 0x0080) != 0
+
+    @classmethod
+    def is_dhcp(cls, info: int) -> bool:
+        """Check if IP was set by DHCP."""
+        return (info & 0x0002) != 0
+
+
+class BlockQualifier:
+    """Block Qualifier values for SET operations (IEC 61158-6-10)."""
+
+    TEMPORARY = 0x0000
+    PERMANENT = 0x0001
+
+    NAMES = {
+        0x0000: "Temporary",
+        0x0001: "Permanent",
+    }
+
+    @classmethod
+    def get_name(cls, qualifier: int) -> str:
+        """Get human-readable name for block qualifier."""
+        return cls.NAMES.get(qualifier, f"Unknown (0x{qualifier:04X})")
+
+
+class ResetQualifier:
+    """Reset to Factory qualifier values (IEC 61158-6-10)."""
+
+    # Mode 1: Reset application data
+    RESET_APPLICATION_DATA = 0x0002
+    RESET_APPLICATION_DATA_ALT = 0x0003
+
+    # Mode 2: Reset communication parameters
+    RESET_COMMUNICATION_PARAM = 0x0004
+    RESET_COMMUNICATION_PARAM_ALT = 0x0005
+
+    # Mode 3: Reset engineering parameters
+    RESET_ENGINEERING_PARAM = 0x0006
+    RESET_ENGINEERING_PARAM_ALT = 0x0007
+
+    # Mode 4: Reset all stored data
+    RESET_ALL_STORED_DATA = 0x0008
+    RESET_ALL_STORED_DATA_ALT = 0x0009
+
+    # Mode 5: Reset engineering parameter (alternate)
+    RESET_ENGINEERING_PARAM_2 = 0x000A
+    RESET_ENGINEERING_PARAM_2_ALT = 0x000B
+
+    # Mode 8: Reset to factory values
+    RESET_TO_FACTORY = 0x0010
+    RESET_TO_FACTORY_ALT = 0x0011
+
+    # Mode 9: Reset and restore data
+    RESET_AND_RESTORE = 0x0012
+    RESET_AND_RESTORE_ALT = 0x0013
+
+    NAMES = {
+        0x0002: "Reset application data",
+        0x0003: "Reset application data",
+        0x0004: "Reset communication parameter",
+        0x0005: "Reset communication parameter",
+        0x0006: "Reset engineering parameter",
+        0x0007: "Reset engineering parameter",
+        0x0008: "Reset all stored data",
+        0x0009: "Reset all stored data",
+        0x000A: "Reset engineering parameter",
+        0x000B: "Reset engineering parameter",
+        0x0010: "Reset to factory values",
+        0x0011: "Reset to factory values",
+        0x0012: "Reset and restore data",
+        0x0013: "Reset and restore data",
+    }
+
+    @classmethod
+    def get_name(cls, qualifier: int) -> str:
+        """Get human-readable name for reset qualifier."""
+        return cls.NAMES.get(qualifier, f"Unknown (0x{qualifier:04X})")
+
+
+class DeviceInitiative:
+    """DeviceInitiative values (IEC 61158-6-10)."""
+
+    NO_HELLO = 0x0000
+    ISSUE_HELLO = 0x0001
+
+    NAMES = {
+        0x0000: "Device does not issue DCP-Hello after power on",
+        0x0001: "Device issues DCP-Hello after power on",
+    }
+
+    @classmethod
+    def get_name(cls, value: int) -> str:
+        """Get human-readable name for device initiative value."""
+        return cls.NAMES.get(value, f"Unknown (0x{value:04X})")
 
 
 class DCPResponseCode:
@@ -218,6 +394,7 @@ class DCPResponseCode:
     SUBOPTION_NOT_SET = 0x03
     RESOURCE_ERROR = 0x04
     SET_NOT_POSSIBLE = 0x05
+    IN_OPERATION_SET_NOT_POSSIBLE = 0x06
 
     NAMES = {
         0x00: "No error",
@@ -226,12 +403,108 @@ class DCPResponseCode:
         0x03: "Suboption not set",
         0x04: "Resource error",
         0x05: "Set not possible",
+        0x06: "In operation, SET not possible",
     }
 
     @classmethod
     def get_name(cls, code: int) -> str:
         """Get human-readable name for response code."""
         return cls.NAMES.get(code, f"Unknown (0x{code:02X})")
+
+
+@dataclass
+class DCPDHCPBlock:
+    """Parsed DHCP block from DCP response."""
+
+    suboption: int
+    suboption_name: str
+    raw_data: bytes
+    hostname: Optional[str] = None
+    client_id: Optional[bytes] = None
+    vendor_specific: Optional[bytes] = None
+    fqdn: Optional[str] = None
+    uuid: Optional[str] = None
+
+    @classmethod
+    def parse(cls, suboption: int, data: bytes) -> "DCPDHCPBlock":
+        """Parse DHCP block data based on suboption type."""
+        suboption_name = DCP_SUBOPTION_NAMES.get(0x03, {}).get(
+            suboption, f"0x{suboption:02X}"
+        )
+        block = cls(suboption=suboption, suboption_name=suboption_name, raw_data=data)
+
+        if suboption == DCP_SUBOPTION_DHCP_HOSTNAME:
+            block.hostname = data.rstrip(b"\x00").decode("utf-8", errors="replace")
+        elif suboption == DCP_SUBOPTION_DHCP_CLIENT_ID:
+            block.client_id = data
+        elif suboption == DCP_SUBOPTION_DHCP_VENDOR_SPEC:
+            block.vendor_specific = data
+        elif suboption == DCP_SUBOPTION_DHCP_FQDN:
+            block.fqdn = data.rstrip(b"\x00").decode("utf-8", errors="replace")
+        elif suboption == DCP_SUBOPTION_DHCP_UUID:
+            if len(data) >= 16:
+                block.uuid = "-".join(
+                    [
+                        data[0:4].hex(),
+                        data[4:6].hex(),
+                        data[6:8].hex(),
+                        data[8:10].hex(),
+                        data[10:16].hex(),
+                    ]
+                )
+
+        return block
+
+
+@dataclass
+class DCPLLDPBlock:
+    """Parsed LLDP block from DCP response."""
+
+    suboption: int
+    suboption_name: str
+    raw_data: bytes
+    port_id: Optional[str] = None
+    chassis_id: Optional[str] = None
+    ttl: Optional[int] = None
+    port_description: Optional[str] = None
+    system_name: Optional[str] = None
+    system_description: Optional[str] = None
+    system_capabilities: Optional[int] = None
+    management_address: Optional[str] = None
+
+    @classmethod
+    def parse(cls, suboption: int, data: bytes) -> "DCPLLDPBlock":
+        """Parse LLDP block data based on suboption type."""
+        suboption_name = DCP_SUBOPTION_NAMES.get(0x04, {}).get(
+            suboption, f"0x{suboption:02X}"
+        )
+        block = cls(suboption=suboption, suboption_name=suboption_name, raw_data=data)
+
+        if suboption == DCP_SUBOPTION_LLDP_PORT_ID:
+            block.port_id = data.rstrip(b"\x00").decode("utf-8", errors="replace")
+        elif suboption == DCP_SUBOPTION_LLDP_CHASSIS_ID:
+            block.chassis_id = data.rstrip(b"\x00").decode("utf-8", errors="replace")
+        elif suboption == DCP_SUBOPTION_LLDP_TTL:
+            if len(data) >= 2:
+                block.ttl = struct.unpack(">H", data[:2])[0]
+        elif suboption == DCP_SUBOPTION_LLDP_PORT_DESC:
+            block.port_description = data.rstrip(b"\x00").decode(
+                "utf-8", errors="replace"
+            )
+        elif suboption == DCP_SUBOPTION_LLDP_SYSTEM_NAME:
+            block.system_name = data.rstrip(b"\x00").decode("utf-8", errors="replace")
+        elif suboption == DCP_SUBOPTION_LLDP_SYSTEM_DESC:
+            block.system_description = data.rstrip(b"\x00").decode(
+                "utf-8", errors="replace"
+            )
+        elif suboption == DCP_SUBOPTION_LLDP_SYSTEM_CAP:
+            if len(data) >= 2:
+                block.system_capabilities = struct.unpack(">H", data[:2])[0]
+        elif suboption == DCP_SUBOPTION_LLDP_MGMT_ADDR:
+            block.management_address = data.hex()
+
+        return block
+
 
 # Parameter name mappings
 PARAMS: Dict[str, Tuple[int, int]] = {
@@ -260,6 +533,9 @@ class DCPDeviceDescription:
         ip: IP address string
         netmask: Network mask string
         gateway: Gateway address string
+        ip_block_info: IP block info value (IPBlockInfo constants)
+        ip_conflict: True if IP address conflict detected
+        ip_set_by_dhcp: True if IP was set by DHCP
         vendor_high: High byte of vendor ID
         vendor_low: Low byte of vendor ID
         device_high: High byte of device ID
@@ -269,6 +545,10 @@ class DCPDeviceDescription:
         device_instance: Device instance (high, low)
         alias_name: Alias name if set
         supported_options: List of supported (option, suboption) tuples
+        dhcp_blocks: List of parsed DHCP blocks
+        lldp_blocks: List of parsed LLDP blocks
+        device_initiative: Device initiative value
+        issues_hello: True if device issues DCP-Hello after power on
     """
 
     def __init__(self, mac: bytes, blocks: Dict[Tuple[int, int], bytes]) -> None:
@@ -300,10 +580,21 @@ class DCPDeviceDescription:
 
         # Handle IP configuration (required)
         ip_block = blocks.get(PNDCPBlock.IP_ADDRESS)
+        self.ip_block_info = 0
+        self.ip_conflict = False
+        self.ip_set_by_dhcp = False
         if ip_block is not None and len(ip_block) >= 12:
             self.ip = s2ip(ip_block[0:4])
             self.netmask = s2ip(ip_block[4:8])
             self.gateway = s2ip(ip_block[8:12])
+            # Check for BlockInfo prefix (14 bytes = 2 byte info + 12 byte IP data)
+            if len(ip_block) >= 14:
+                self.ip_block_info = struct.unpack(">H", ip_block[0:2])[0]
+                self.ip_conflict = IPBlockInfo.has_conflict(self.ip_block_info)
+                self.ip_set_by_dhcp = IPBlockInfo.is_dhcp(self.ip_block_info)
+                self.ip = s2ip(ip_block[2:6])
+                self.netmask = s2ip(ip_block[6:10])
+                self.gateway = s2ip(ip_block[10:14])
         else:
             self.ip = "0.0.0.0"
             self.netmask = "0.0.0.0"
@@ -355,6 +646,32 @@ class DCPDeviceDescription:
                 subopt = options_block[i + 1]
                 self.supported_options.append((opt, subopt))
 
+        # Parse DHCP blocks
+        self.dhcp_blocks: List[DCPDHCPBlock] = []
+        for key, data in blocks.items():
+            if isinstance(key, tuple) and len(key) == 2:
+                opt, subopt = key
+                if opt == DCP_OPTION_DHCP:
+                    self.dhcp_blocks.append(DCPDHCPBlock.parse(subopt, data))
+
+        # Parse LLDP blocks
+        self.lldp_blocks: List[DCPLLDPBlock] = []
+        for key, data in blocks.items():
+            if isinstance(key, tuple) and len(key) == 2:
+                opt, subopt = key
+                if opt == DCP_OPTION_LLDP:
+                    self.lldp_blocks.append(DCPLLDPBlock.parse(subopt, data))
+
+        # Handle DeviceInitiative (optional) - (6, 1)
+        initiative_block = blocks.get(
+            (DCP_OPTION_DEVICE_INITIATIVE, DCP_SUBOPTION_DEVICE_INITIATIVE)
+        )
+        self.device_initiative = 0
+        self.issues_hello = False
+        if initiative_block is not None and len(initiative_block) >= 2:
+            self.device_initiative = struct.unpack(">H", initiative_block[0:2])[0]
+            self.issues_hello = self.device_initiative == DeviceInitiative.ISSUE_HELLO
+
         # Store all raw blocks for unknown/vendor-specific options
         self.raw_blocks: Dict[Tuple[int, int], bytes] = {}
         known_blocks = {
@@ -363,10 +680,14 @@ class DCPDeviceDescription:
             PNDCPBlock.DEVICE_ALIAS, PNDCPBlock.DEVICE_INSTANCE,
             (DCP_OPTION_DEVICE, DCP_SUBOPTION_DEVICE_INSTANCE),
             (DCP_OPTION_DEVICE, DCP_SUBOPTION_DEVICE_ALIAS),
+            (DCP_OPTION_DEVICE_INITIATIVE, DCP_SUBOPTION_DEVICE_INITIATIVE),
         }
+        # Exclude DHCP and LLDP blocks from raw_blocks
         for key, value in blocks.items():
             if isinstance(key, tuple) and key not in known_blocks:
-                self.raw_blocks[key] = value
+                opt, _ = key
+                if opt not in (DCP_OPTION_DHCP, DCP_OPTION_LLDP):
+                    self.raw_blocks[key] = value
 
     @property
     def vendor_id(self) -> int:
@@ -400,6 +721,15 @@ class DCPDeviceDescription:
             f"  IP:      {self.ip}",
             f"  Netmask: {self.netmask}",
             f"  Gateway: {self.gateway}",
+        ])
+        # IP Block Info
+        if self.ip_block_info:
+            lines.append(f"  IP Info: {IPBlockInfo.get_name(self.ip_block_info)}")
+        if self.ip_conflict:
+            lines.append("  Warning: IP address conflict detected")
+        if self.ip_set_by_dhcp:
+            lines.append("  IP Source: DHCP")
+        lines.extend([
             f"  Vendor:  {self.vendor_name} (0x{self.vendor_id:04X})",
             f"  Device:  0x{self.device_id:04X}",
         ])
@@ -409,9 +739,36 @@ class DCPDeviceDescription:
             lines.append(f"  Instance: {self.device_instance[0]}.{self.device_instance[1]}")
         if self.alias_name:
             lines.append(f"  Alias:   {self.alias_name}")
+        # Device Initiative
+        if self.device_initiative:
+            lines.append(f"  Initiative: {DeviceInitiative.get_name(self.device_initiative)}")
         if self.supported_options:
             opts = [get_block_name(o, s) for o, s in self.supported_options]
             lines.append(f"  Supports: {', '.join(opts)}")
+        # DHCP blocks
+        if self.dhcp_blocks:
+            lines.append("  DHCP:")
+            for block in self.dhcp_blocks:
+                if block.hostname:
+                    lines.append(f"    Hostname: {block.hostname}")
+                elif block.fqdn:
+                    lines.append(f"    FQDN: {block.fqdn}")
+                elif block.uuid:
+                    lines.append(f"    UUID: {block.uuid}")
+                else:
+                    lines.append(f"    {block.suboption_name}: {block.raw_data.hex()}")
+        # LLDP blocks
+        if self.lldp_blocks:
+            lines.append("  LLDP:")
+            for block in self.lldp_blocks:
+                if block.system_name:
+                    lines.append(f"    SystemName: {block.system_name}")
+                elif block.port_id:
+                    lines.append(f"    PortID: {block.port_id}")
+                elif block.chassis_id:
+                    lines.append(f"    ChassisID: {block.chassis_id}")
+                else:
+                    lines.append(f"    {block.suboption_name}: {block.raw_data.hex()}")
         if self.raw_blocks:
             for (opt, subopt), data in self.raw_blocks.items():
                 lines.append(f"  Unknown ({opt},{subopt}): {data.hex()}")
@@ -554,6 +911,7 @@ def set_ip(
     ip: str,
     netmask: str,
     gateway: str,
+    permanent: bool = False,
     timeout_sec: int = 5,
 ) -> bool:
     """Set IP configuration on a PROFINET device via DCP.
@@ -565,6 +923,7 @@ def set_ip(
         ip: New IP address (e.g., "192.168.10.3")
         netmask: Subnet mask (e.g., "255.255.255.0")
         gateway: Gateway address (e.g., "192.168.10.1")
+        permanent: If True, save IP permanently; if False, temporary (default)
         timeout_sec: Timeout in seconds
 
     Returns:
@@ -585,11 +944,15 @@ def set_ip(
     # IP block payload: 2 bytes qualifier + 4 IP + 4 netmask + 4 gateway = 14 bytes
     value_bytes = ip_bytes + netmask_bytes + gateway_bytes
 
+    # Use appropriate qualifier based on permanent flag
+    qualifier = BlockQualifier.PERMANENT if permanent else BlockQualifier.TEMPORARY
+    qualifier_bytes = struct.pack(">H", qualifier)
+
     block = PNDCPBlockRequest(
         PNDCPBlock.IP_ADDRESS[0],  # Option (0x01 = IP)
         PNDCPBlock.IP_ADDRESS[1],  # Suboption (0x02 = IP Suite)
         len(value_bytes) + 2,  # Length includes 2-byte qualifier
-        payload=bytes([0x00, 0x01]) + value_bytes,  # 0x0001 = set temporary
+        payload=qualifier_bytes + value_bytes,
     )
 
     # Calculate length with padding (blocks are 2-byte aligned)
@@ -812,6 +1175,208 @@ def read_response(
 
     logger.debug(f"DCP discovery found {len(result)} devices")
     return result
+
+
+def send_hello(
+    sock: socket,
+    src: bytes,
+    station_name: str,
+    ip: str = "0.0.0.0",
+    netmask: str = "0.0.0.0",
+    gateway: str = "0.0.0.0",
+    device_id: Tuple[int, int] = (0, 0),
+    device_role: int = DEVICE_ROLE_IO_DEVICE,
+) -> None:
+    """Send DCP Hello multicast announcement.
+
+    This allows a device to announce its presence after power-on.
+    Used by devices with DeviceInitiative = 0x0001.
+
+    Args:
+        sock: Raw Ethernet socket
+        src: Source MAC address (6 bytes)
+        station_name: Device station name
+        ip: IP address (default: "0.0.0.0")
+        netmask: Subnet mask (default: "0.0.0.0")
+        gateway: Gateway address (default: "0.0.0.0")
+        device_id: (vendor_id, device_id) tuple (default: (0, 0))
+        device_role: Device role bitmask (default: IO-Device)
+    """
+    xid = _generate_xid()
+
+    # Build blocks for Hello PDU
+    blocks_data = b""
+
+    # Name of Station block
+    name_bytes = station_name.encode("ascii")
+    name_block = PNDCPBlockRequest(
+        DCP_OPTION_DEVICE,
+        DCP_SUBOPTION_DEVICE_NAME,
+        len(name_bytes),
+        payload=name_bytes,
+    )
+    blocks_data += bytes(name_block)
+    if len(name_bytes) % 2 == 1:
+        blocks_data += b"\x00"  # Padding
+
+    # IP block
+    ip_bytes = ip2s(ip) + ip2s(netmask) + ip2s(gateway)
+    ip_block = PNDCPBlockRequest(
+        DCP_OPTION_IP,
+        DCP_SUBOPTION_IP_PARAMETER,
+        len(ip_bytes),
+        payload=ip_bytes,
+    )
+    blocks_data += bytes(ip_block)
+
+    # Device ID block
+    device_id_bytes = struct.pack(
+        ">HH", device_id[0], device_id[1]
+    )
+    device_id_block = PNDCPBlockRequest(
+        DCP_OPTION_DEVICE,
+        DCP_SUBOPTION_DEVICE_ID,
+        len(device_id_bytes),
+        payload=device_id_bytes,
+    )
+    blocks_data += bytes(device_id_block)
+
+    # Device Role block
+    role_bytes = bytes([device_role, 0x00])
+    role_block = PNDCPBlockRequest(
+        DCP_OPTION_DEVICE,
+        DCP_SUBOPTION_DEVICE_ROLE,
+        len(role_bytes),
+        payload=role_bytes,
+    )
+    blocks_data += bytes(role_block)
+
+    # Device Initiative block
+    initiative_bytes = struct.pack(">H", DeviceInitiative.ISSUE_HELLO)
+    initiative_block = PNDCPBlockRequest(
+        DCP_OPTION_DEVICE_INITIATIVE,
+        DCP_SUBOPTION_DEVICE_INITIATIVE,
+        len(initiative_bytes),
+        payload=initiative_bytes,
+    )
+    blocks_data += bytes(initiative_block)
+
+    # Build DCP header
+    dcp = PNDCPHeader(
+        DCP_HELLO_FRAME_ID,
+        PNDCPHeader.HELLO,
+        PNDCPHeader.REQUEST,
+        xid,
+        0,  # No response delay for Hello
+        len(blocks_data),
+        payload=blocks_data,
+    )
+
+    # Send to multicast address
+    eth = EthernetHeader(
+        s2mac(DCP_MULTICAST_MAC),
+        src,
+        PROFINET_ETHERTYPE,
+        payload=dcp,
+    )
+
+    sock.send(bytes(eth))
+    logger.debug(f"Sent DCP Hello (station={station_name}, xid=0x{xid:08X})")
+
+
+def receive_hello(
+    sock: socket,
+    my_mac: bytes,
+    timeout_sec: int = 10,
+    callback: Optional[Callable[[DCPDeviceDescription], None]] = None,
+) -> List[DCPDeviceDescription]:
+    """Listen for DCP Hello announcements.
+
+    Args:
+        sock: Raw Ethernet socket
+        my_mac: Our MAC address (6 bytes) for filtering
+        timeout_sec: Maximum time to wait
+        callback: Optional callback for each Hello received
+
+    Returns:
+        List of DCPDeviceDescription objects from Hello PDUs
+    """
+    devices: List[DCPDeviceDescription] = []
+    sock.settimeout(2.0)
+
+    try:
+        with max_timeout(timeout_sec) as timer:
+            while not timer.timed_out:
+                try:
+                    data = sock.recv(MAX_ETHERNET_FRAME)
+                except SocketTimeout:
+                    continue
+
+                if len(data) < 14:
+                    continue
+
+                eth = EthernetHeader(data)
+
+                # Handle VLAN
+                payload = eth.payload
+                if eth.type == VLAN_ETHERTYPE:
+                    if len(payload) < 4:
+                        continue
+                    inner_type = (payload[2] << 8) | payload[3]
+                    if inner_type != PROFINET_ETHERTYPE:
+                        continue
+                    payload = payload[4:]
+                elif eth.type != PROFINET_ETHERTYPE:
+                    continue
+
+                if len(payload) < 10:
+                    continue
+
+                try:
+                    dcp = PNDCPHeader(payload)
+                except (ValueError, struct.error):
+                    continue
+
+                # Filter for Hello requests only
+                if dcp.service_id != PNDCPHeader.HELLO:
+                    continue
+                if dcp.service_type != PNDCPHeader.REQUEST:
+                    continue
+
+                # Parse blocks
+                blocks: Dict[Tuple[int, int], bytes] = {}
+                offset = 0
+                dcp_payload = dcp.payload
+                while offset < len(dcp_payload) - 4:
+                    try:
+                        opt = dcp_payload[offset]
+                        subopt = dcp_payload[offset + 1]
+                        length = (dcp_payload[offset + 2] << 8) | dcp_payload[offset + 3]
+                        block_data = dcp_payload[offset + 4 : offset + 4 + length]
+                        blocks[(opt, subopt)] = block_data
+                        # Move to next block (2-byte aligned)
+                        block_len = 4 + length
+                        if length % 2 == 1:
+                            block_len += 1
+                        offset += block_len
+                    except (IndexError, struct.error):
+                        break
+
+                try:
+                    device = DCPDeviceDescription(eth.src, blocks)
+                    devices.append(device)
+
+                    if callback:
+                        callback(device)
+
+                    logger.debug(f"Received DCP Hello from {device.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse Hello from {mac2s(eth.src)}: {e}")
+
+    except TimeoutError:
+        pass
+
+    return devices
 
 
 def signal_device(
